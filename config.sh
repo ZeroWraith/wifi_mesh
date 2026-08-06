@@ -11,8 +11,9 @@
 # IP address for this drone (must be unique in mesh)
 DRONE_IP="10.0.0.1"
 
-# Mesh interface name (default: wlan0, change if using different adapter)
-MESH_IFACE="wlan0"
+# Physical WiFi interface name (before batman-adv creates bat0)
+# If empty, auto-detection will try to find your WiFi adapter
+PHYS_IFACE=""
 
 # Optional: Additional network interface for internet/GCS access
 # Set to physical interface name (e.g., eth0, wlan1) or leave empty

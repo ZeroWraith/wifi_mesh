@@ -18,8 +18,9 @@
 10. [Network Visualization from Ground Station](#10-network-visualization-from-ground-station)
 11. [Performance Tuning](#11-performance-tuning)
 12. [Troubleshooting](#12-troubleshooting)
-13. [Uninstalling the Mesh Network](#13-uninstalling-the-mesh-network)
-14. [References](#14-references)
+13. [Ad-Hoc (IBSS) Mode](#13-ad-hoc-ibss-mode)
+14. [Uninstalling the Mesh Network](#14-uninstalling-the-mesh-network)
+15. [References](#15-references)
 
 ---
 
@@ -1606,9 +1607,205 @@ sudo systemctl start mavlink-forwarder
 
 ---
 
-## 13. Uninstalling the Mesh Network
+## 13. Ad-Hoc (IBSS) Mode
 
-### 13.1 Using the Uninstall Script
+### 13.1 When to Use Ad-Hoc Mode
+
+Ad-hoc (IBSS) mode is an alternative to 802.11s mesh point mode for creating the wireless link between drones. Use ad-hoc mode when:
+
+- Your WiFi adapter does **not** support 802.11s mesh point mode
+- You need quick setup for testing/development
+- Your hardware driver only supports IBSS
+
+**Check if your adapter supports mesh point mode:**
+```bash
+iw phy | grep -A8 "interface modes"
+```
+
+If you see `mesh point` in the output, use the standard 802.11s setup (Section 5). If you only see `IBSS`, use this ad-hoc section.
+
+### 13.2 Mesh Point vs Ad-Hoc Comparison
+
+| Feature | Mesh Point (802.11s) | Ad-Hoc (IBSS) |
+|---------|---------------------|---------------|
+| **Batman-adv support** | Yes | Yes |
+| **Auto-detection** | Yes (check `iw phy`) | Yes (fallback) |
+| **Performance** | Better throughput | Slightly lower |
+| **Reliability** | More robust | Adequate for testing |
+| **SAE authentication** | Supported | Not available |
+| **Multi-hop native** | Yes (built into 802.11s) | No (batman-adv handles) |
+| **Setup complexity** | Higher (wpa_supplicant) | Lower (iwconfig) |
+
+### 13.3 Auto-Detection with setup_adhoc.sh
+
+The `setup_adhoc.sh` script automatically detects whether your adapter supports mesh point mode and falls back to ad-hoc if needed:
+
+```bash
+# The script checks:
+iw phy | grep "mesh point"
+
+# If found → uses 802.11s mesh point mode
+# If NOT found → uses ad-hoc (IBSS) mode
+```
+
+**Usage:**
+```bash
+sudo ./setup_adhoc.sh
+```
+
+The script will:
+1. Detect your WiFi interface automatically
+2. Check for mesh point support
+3. Configure the appropriate mode
+4. Create bat0 and assign IP address
+
+### 13.4 Step-by-Step Ad-Hoc Configuration
+
+If you prefer manual configuration instead of using the script:
+
+#### Check for IBSS Support
+
+```bash
+iw phy | grep -A8 "interface modes"
+```
+
+Look for `IBSS` in the output.
+
+#### Set Up Ad-Hoc Interface
+
+```bash
+# Take interface down
+sudo ip link set wlan0 down
+
+# Set to ad-hoc mode
+sudo iwconfig wlan0 mode ad-hoc
+
+# Set network name (must be SAME on all drones)
+sudo iwconfig wlan0 essid "drone-mesh"
+
+# Set channel (must be SAME on all drones)
+sudo iwconfig wlan0 channel 6
+
+# Bring interface up
+sudo ip link set wlan0 up
+```
+
+#### Verify Ad-Hoc Mode
+
+```bash
+iwconfig wlan0
+```
+
+Should show `Mode:Ad-Hoc` and the ESSID.
+
+#### Configure Batman-Adv
+
+```bash
+# Load batman-adv module
+sudo modprobe batman_adv
+
+# Create bat0 interface
+sudo batctl if add wlan0
+
+# Bring up bat0
+sudo ip link set bat0 up
+
+# Set routing algorithm
+sudo batctl routing_algo BATMAN_V
+
+# Assign IP address (unique per drone)
+sudo ip addr add 10.0.0.2/24 dev bat0
+```
+
+#### Test Connectivity
+
+After setting up another drone with a different IP (e.g., 10.0.0.1):
+
+```bash
+# Check batman-adv neighbors
+sudo batctl o
+
+# Test connectivity
+ping 10.0.0.1
+```
+
+### 13.5 Building Batman-Adv from Source (Jetson Tegra)
+
+The Jetson's Tegra kernel does not include batman-adv by default. You must build it from source.
+
+#### Prerequisites
+
+```bash
+sudo apt-get install -y build-essential git
+```
+
+#### Clone and Build
+
+```bash
+# Clone batman-adv source
+cd /tmp
+git clone https://git.open-mesh.org/batman-adv.git
+cd batman-adv
+
+# Generate compatibility header
+bash gen-compat-autoconf.sh
+
+# Build against running kernel
+sudo make -C /lib/modules/$(uname -r)/build M=/tmp/batman-adv PWD=/tmp/batman-adv modules
+```
+
+#### Known Issue: timer_shutdown_sync
+
+If you see this error:
+```
+error: static declaration of 'timer_shutdown_sync' follows non-static declaration
+```
+
+Fix by editing `compat-include/linux/timer.h` — change the version check:
+```c
+#if LINUX_VERSION_IS_LESS(5, 15, 148)
+```
+
+Then rebuild.
+
+#### Install and Load
+
+```bash
+# Install module
+sudo make -C /lib/modules/$(uname -r)/build M=/tmp/batman-adv PWD=/tmp/batman-adv modules_install
+
+# Update module dependencies
+sudo depmod -a
+
+# Load module
+sudo modprobe batman_adv
+
+# Verify
+lsmod | grep batman
+```
+
+#### Make Persistent Across Reboots
+
+```bash
+echo 'batman_adv' | sudo tee /etc/modules-load.d/batman-adv.conf
+```
+
+### 13.6 Ad-Hoc Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `iwconfig: command not found` | Install wireless-tools: `sudo apt install wireless-tools` |
+| `Mode:Auto` after setting ad-hoc | Interface may need to be down before changing mode |
+| No neighbors in `batctl o` | Wait 10-30 seconds for OGM propagation |
+| `batman_adv: Unknown symbol` | Module not built for your kernel, rebuild from source |
+| ESSID mismatch | All drones must use the EXACT same ESSID |
+| Channel mismatch | All drones must be on the SAME channel |
+
+---
+
+## 14. Uninstalling the Mesh Network
+
+### 14.1 Using the Uninstall Script
 
 The `uninstall.sh` script completely removes the mesh configuration and restores the system to its original state:
 
@@ -1628,7 +1825,7 @@ sudo ./uninstall.sh
 - Installed packages (batctl, alfred, etc.) - these remain available
 - WiFi adapter drivers - these remain functional
 
-### 13.2 Manual Cleanup
+### 14.2 Manual Cleanup
 
 If you need to remove specific components manually without using the full uninstall script:
 
@@ -1653,7 +1850,7 @@ sudo rm /etc/modules-load.d/batman-adv.conf
 sudo rm -rf /opt/mesh
 ```
 
-### 13.3 After Uninstalling
+### 14.3 After Uninstalling
 
 Reboot to ensure all changes take effect:
 ```bash
@@ -1662,7 +1859,7 @@ sudo reboot
 
 ---
 
-## 14. References
+## 15. References
 
 ### Official Documentation
 - [Batman-Adv Kernel Documentation](https://docs.kernel.org/networking/batman-adv.html)
@@ -1723,6 +1920,24 @@ sudo ./uninstall.sh    # Complete removal
 sudo batctl if del bat0
 sudo rmmod batman_adv
 sudo systemctl disable batman-mesh
+
+# Ad-Hoc / IBSS Mode (when mesh point not supported)
+iw phy | grep -A8 "interface modes"  # Check for IBSS support
+sudo ip link set wlan0 down
+sudo iwconfig wlan0 mode ad-hoc
+sudo iwconfig wlan0 essid "drone-mesh"
+sudo iwconfig wlan0 channel 6
+sudo ip link set wlan0 up
+sudo batctl if add wlan0
+sudo ip link set bat0 up
+sudo ip addr add 10.0.0.X/24 dev bat0
+
+# Build batman-adv from source (Jetson Tegra)
+cd /tmp && git clone https://git.open-mesh.org/batman-adv.git
+cd batman-adv && bash gen-compat-autoconf.sh
+sudo make -C /lib/modules/$(uname -r)/build M=/tmp/batman-adv PWD=/tmp/batman-adv modules
+sudo make -C /lib/modules/$(uname -r)/build M=/tmp/batman-adv PWD=/tmp/batman-adv modules_install
+sudo depmod -a && sudo modprobe batman_adv
 ```
 
 ### Default Settings
