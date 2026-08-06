@@ -1,0 +1,15 @@
+[Unit]
+Description=Batman-Adv Mesh Network
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/mesh/start_mesh.sh
+ExecStop=/opt/mesh/stop_mesh.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
