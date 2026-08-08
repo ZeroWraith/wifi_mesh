@@ -9,11 +9,15 @@
 # ----- DRONE IDENTITY (UNIQUE PER DRONE) -----
 
 # IP address for this drone (must be unique in mesh)
-DRONE_IP="10.0.0.1"
+DRONE_IP="10.0.0.3"
 
 # Physical WiFi interface name (before batman-adv creates bat0)
 # If empty, auto-detection will try to find your WiFi adapter
-PHYS_IFACE=""
+PHYS_IFACE="wlp0s20f3"
+
+# Mesh interface name (after batman-adv creates bat0)
+# Usually "bat0" - no need to change unless you know what you're doing
+MESH_IFACE="bat0"
 
 # Optional: Additional network interface for internet/GCS access
 # Set to physical interface name (e.g., eth0, wlan1) or leave empty
@@ -23,6 +27,10 @@ EXTERNAL_IFACE=""
 
 # Mesh ID (must be SAME on all drones for them to join same mesh)
 MESH_ID="drone-mesh"
+
+# Fixed IBSS BSSID (must be SAME on all nodes)
+# Both nodes must join with this exact BSSID to be in the same IBSS network
+MESH_BSSID="02:12:34:56:78:9a"
 
 # Channel for mesh operation (must be SAME on all drones)
 # Use channels 1-11 for 2.4 GHz, 36-165 for 5 GHz
@@ -57,10 +65,6 @@ BROADCAST="10.0.0.255"
 DNS_SERVER="8.8.8.8"
 
 # ----- INTERFACE NAMES (AUTO-DETECTED OR MANUAL) -----
-
-# Physical WiFi interface (before batman-adv creates bat0)
-# If empty, auto-detection will try to find your WiFi adapter
-PHYS_IFACE=""
 
 # ----- ADVANCED SETTINGS -----
 

@@ -78,19 +78,13 @@ install_packages() {
                 batctl \
                 alfred \
                 iw \
-                wireless-tools \
                 wpasupplicant \
                 hostapd \
                 bridge-utils \
                 net-tools \
                 iproute2 \
-                ifupdown \
-                dhcpcd5 \
-                firmware-linux-free \
-                firmware-linux-nonfree \
                 python3 \
                 python3-pip \
-                python3-gi \
                 gstreamer1.0-tools \
                 gstreamer1.0-plugins-base \
                 gstreamer1.0-plugins-good \
@@ -100,7 +94,7 @@ install_packages() {
                 v4l-utils \
                 gpsd \
                 gpsd-clients \
-                python3-gps
+                python3-gps || true
             ;;
         fedora|rhel|centos)
             dnf install -y \
