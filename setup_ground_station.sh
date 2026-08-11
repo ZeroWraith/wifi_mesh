@@ -25,6 +25,7 @@ MESH_ID="drone-mesh"
 MESH_BSSID="02:12:34:56:78:9a"
 MESH_CHANNEL=6
 MESH_ESSID="drone-mesh"
+BATMAN_ROUTING="BATMAN_IV"
 
 log()  { echo -e "${GREEN}[GCS]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -98,6 +99,20 @@ stop_conflicts() {
     pkill -f wpa_supplicant 2>/dev/null || true
     systemctl stop wpa_supplicant 2>/dev/null || true
     systemctl stop hostapd 2>/dev/null || true
+
+    # Clean up any existing batman-adv state
+    batctl if del bat0 2>/dev/null || true
+    ip addr flush dev bat0 2>/dev/null || true
+    ip link set bat0 down 2>/dev/null || true
+
+    # Flush stale IPs from physical interface (e.g., old DHCP addresses)
+    log "Cleaning up stale addresses on $PHYS_IFACE..."
+    ip addr flush dev "$PHYS_IFACE" 2>/dev/null || true
+
+    # Leave any existing IBSS or mesh networks
+    iw dev "$PHYS_IFACE" ibss leave 2>/dev/null || true
+    ip link set "$PHYS_IFACE" down 2>/dev/null || true
+    sleep 1
 }
 
 # ---- Load kernel modules ----
@@ -107,6 +122,20 @@ load_modules() {
     modprobe cfg80211 2>/dev/null || true
     modprobe mac80211 2>/dev/null || true
     log "Kernel modules loaded"
+}
+
+# ---- Check adapter health ----
+check_adapter_health() {
+    log "Checking WiFi adapter health..."
+
+    local txpower
+    txpower=$(iw dev "$PHYS_IFACE" info 2>/dev/null | grep "txpower" | awk '{print $2}')
+
+    if [ -n "$txpower" ] && ([ "$txpower" = "-100.00" ] || [ "$txpower" = "-100" ]); then
+        warn "txpower is ${txpower} dBm - known Intel/Realtek quirk in managed mode, not a real problem"
+    fi
+
+    log "Adapter txpower: ${txpower:-unknown} dBm"
 }
 
 # ---- Setup wireless link ----
@@ -152,14 +181,23 @@ setup_batman() {
     rmmod batman_adv 2>/dev/null || true
     sleep 1
 
-    # Load module (default BATMAN_V, can be overridden)
-    log "Loading batman_adv module..."
-    modprobe batman_adv || error "Failed to load batman_adv module"
+    # Load module with BATMAN_V routing algorithm
+    local algo="${BATMAN_ROUTING:-BATMAN_V}"
+    log "Loading batman_adv with routing_algo=$algo..."
+    modprobe batman_adv "batman_adv.routing_algo=$algo" || modprobe batman_adv || error "Failed to load batman_adv module"
 
-    # Verify algo
-    local algo
-    algo=$(cat /sys/module/batman_adv/parameters/routing_algo 2>/dev/null || echo "unknown")
-    log "Routing algorithm: $algo"
+    # Verify algo was applied
+    local current_algo
+    current_algo=$(cat /sys/module/batman_adv/parameters/routing_algo 2>/dev/null || echo "unknown")
+    if [ "$current_algo" != "$algo" ]; then
+        warn "Routing algo is $current_algo, expected $algo. Trying sysfs write..."
+        echo "$algo" > /sys/module/batman_adv/parameters/routing_algo 2>/dev/null || true
+        current_algo=$(cat /sys/module/batman_adv/parameters/routing_algo 2>/dev/null || echo "unknown")
+        if [ "$current_algo" != "$algo" ]; then
+            warn "Could not set $algo, using $current_algo"
+        fi
+    fi
+    log "Routing algorithm: $current_algo"
 
     # Add interface to batman
     sleep 2
@@ -304,15 +342,29 @@ GCS_IP="10.0.0.100"
 MESH_ESSID="drone-mesh"
 MESH_BSSID="02:12:34:56:78:9a"
 MESH_CHANNEL=6
+ALGO="BATMAN_IV"
 
-modprobe batman_adv 2>/dev/null || true
+# Clean start - remove any existing batman state
+rmmod batman_adv 2>/dev/null || true
+sleep 1
+
+modprobe batman_adv "batman_adv.routing_algo=$ALGO" 2>/dev/null || modprobe batman_adv 2>/dev/null || true
+sleep 2
 
 if command -v nmcli &>/dev/null; then
     nmcli device set "$PHYS_IFACE" managed no 2>/dev/null || true
+    nmcli device disconnect "$PHYS_IFACE" 2>/dev/null || true
 fi
 pkill -f hostapd 2>/dev/null || true
 pkill -f wpa_supplicant 2>/dev/null || true
 
+# Clean up any existing state
+batctl if del bat0 2>/dev/null || true
+ip addr flush dev bat0 2>/dev/null || true
+ip link set bat0 down 2>/dev/null || true
+ip addr flush dev "$PHYS_IFACE" 2>/dev/null || true
+iw dev "$PHYS_IFACE" ibss leave 2>/dev/null || true
+iw dev "$PHYS_IFACE" leave 2>/dev/null || true
 ip link set "$PHYS_IFACE" down 2>/dev/null || true
 sleep 1
 
@@ -328,12 +380,7 @@ FREQ=$((2412 + ($MESH_CHANNEL - 1) * 5))
 iw dev "$PHYS_IFACE" ibss join "$MESH_ESSID" "$FREQ" fixed-freq "$MESH_BSSID" 2>/dev/null || true
 sleep 2
 
-# Reload batman-adv with correct routing algo
-rmmod batman_adv 2>/dev/null || true
-sleep 1
-modprobe batman_adv 2>/dev/null || true
-sleep 2
-
+# Add interface to batman-adv
 batctl if add "$PHYS_IFACE"
 sleep 2
 ip addr add "${GCS_IP}/24" dev bat0 2>/dev/null || true
@@ -344,6 +391,9 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 iptables -I INPUT -i bat0 -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i bat0 -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -o bat0 -j ACCEPT 2>/dev/null || true
+
+# Wait for bat0 to get IPv6 before starting alfred
+sleep 3
 
 pkill -f "alfred -i bat0" 2>/dev/null || true
 sleep 1
@@ -359,7 +409,16 @@ STARTEOF
 pkill -f alfred 2>/dev/null || true
 pkill -f batadv-vis 2>/dev/null || true
 batctl if del bat0 2>/dev/null || true
+ip addr flush dev bat0 2>/dev/null || true
 ip link set bat0 down 2>/dev/null || true
+IFACE="__PHYS_IFACE__"
+if [ -n "$IFACE" ] && ip link show "$IFACE" &>/dev/null; then
+    ip link set "$IFACE" down 2>/dev/null || true
+    iw dev "$IFACE" ibss leave 2>/dev/null || true
+    ip addr flush dev "$IFACE" 2>/dev/null || true
+    iwconfig "$IFACE" mode managed 2>/dev/null || true
+    ip link set "$IFACE" up 2>/dev/null || true
+fi
 STOPEOF
 
     # Replace PHYS_IFACE placeholder
@@ -386,6 +445,7 @@ main() {
     install_packages
     stop_conflicts
     load_modules
+    check_adapter_health
     setup_wifi_link
     setup_batman
     verify

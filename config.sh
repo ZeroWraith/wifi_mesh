@@ -43,7 +43,7 @@ MESH_BAND="2g"
 
 # Routing algorithm: "BATMAN_V" (throughput-based, recommended)
 # or "BATMAN_IV" (older, simpler)
-BATMAN_ROUTING="BATMAN_V"
+BATMAN_ROUTING="BATMAN_IV"
 
 # Gateway mode: "off", "client", or "server"
 # Set to "server" if this drone has internet access to share

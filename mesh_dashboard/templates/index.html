@@ -291,7 +291,7 @@
         svg.call(zoom);
 
         let simulation = null;
-        let currentData = { nodes: [], links: [] };
+        let lastTopologyHash = "";
 
         function linkClass(tq) {
             if (tq > 200) return "strong";
@@ -306,8 +306,9 @@
         }
 
         function shortenMac(mac) {
-            if (!mac) return "??";
+            if (!mac || mac === "??" || mac === "") return "";
             const parts = mac.split(":");
+            if (parts.length < 2) return mac;
             return parts.slice(-2).join(":");
         }
 
@@ -327,10 +328,12 @@
             if (status) {
                 document.getElementById("node-count").textContent = status.node_count;
                 document.getElementById("local-ip").textContent = status.local_ip || "--";
+
+                const active = status.mesh_active;
                 document.getElementById("status-text").textContent =
-                    status.node_count > 0 ? "Mesh Active" : "No Nodes";
+                    active ? "Mesh Active" : (status.bat0_up ? "No Neighbors" : "Mesh Down");
                 document.getElementById("status-dot").className =
-                    "status-dot" + (status.node_count > 0 ? "" : " offline");
+                    "status-dot" + (active ? "" : " offline");
                 document.getElementById("timestamp").textContent = status.timestamp;
 
                 updateNodeList(status.nodes);
@@ -338,7 +341,17 @@
             }
 
             if (topology) {
-                buildGraph(topology, status ? status.local_ip : null);
+                const hash = JSON.stringify(topology);
+                if (hash !== lastTopologyHash) {
+                    lastTopologyHash = hash;
+                    buildGraph(topology, status ? status.local_ip : null);
+                }
+            }
+
+            if (status && !status.mesh_active) {
+                g.selectAll("*").remove();
+                simulation = null;
+                lastTopologyHash = "";
             }
         }
 
@@ -371,17 +384,22 @@
             el.innerHTML = nodes.map(n => {
                 const tq = n.tq || 0;
                 const pct = Math.round((tq / 255) * 100);
-                const cls = pct > 80 ? "link-strong" : pct > 50 ? "link-medium" : "link-weak";
+                const isStale = n.stale;
+                const cls = isStale ? "link-weak" : (pct > 80 ? "link-strong" : pct > 50 ? "link-medium" : "link-weak");
+                const macLabel = shortenMac(n.mac) || "unknown";
+                const viaLabel = shortenMac(n.nexthop);
+                const viaText = viaLabel ? `via ${viaLabel} | ` : "";
+                const staleText = isStale ? ` <span style="color:#f44336;">OFFLINE (${Math.round(n.last_seen_ms/1000)}s ago)</span>` : "";
                 return `
                     <div class="node-item">
                         <div>
-                            <div class="node-mac">${shortenMac(n.mac)}</div>
-                            <div class="node-info">via ${shortenMac(n.nexthop)} | ${n.outgoing_interface}</div>
+                            <div class="node-mac">${macLabel}${staleText}</div>
+                            <div class="node-info">${viaText}${n.outgoing_interface || ""}</div>
                             <div class="metric-bar">
-                                <div class="metric-fill" style="width:${pct}%;background:${linkColor(tq)}"></div>
+                                <div class="metric-fill" style="width:${pct}%;background:${isStale ? '#f44336' : linkColor(tq)}"></div>
                             </div>
                         </div>
-                        <span class="link-quality ${cls}">${pct}%</span>
+                        <span class="link-quality ${cls}">${isStale ? "DOWN" : pct + "%"}</span>
                     </div>
                 `;
             }).join("");
@@ -391,71 +409,107 @@
             const nodeMap = {};
             const nodes = [];
             const links = [];
+            let localMac = null;
 
-            if (!topology || !Array.isArray(topology)) {
+            if (!topology || !Array.isArray(topology) || topology.length === 0) {
                 g.selectAll("*").remove();
+                simulation = null;
                 return;
             }
 
             topology.forEach(entry => {
-                const mac = entry.primary;
-                if (!nodeMap[mac]) {
-                    const isLocal = entry.last_seen === localIp || entry.originator === localIp;
-                    nodeMap[mac] = {
-                        id: mac,
-                        label: shortenMac(mac),
-                        local: isLocal,
-                        tq: entry.tq || 255,
-                    };
-                    nodes.push(nodeMap[mac]);
+                if (entry.primary) {
+                    localMac = entry.primary;
                 }
-                if (entry.neighbor) {
-                    if (!nodeMap[entry.neighbor]) {
-                        nodeMap[entry.neighbor] = {
-                            id: entry.neighbor,
-                            label: shortenMac(entry.neighbor),
-                            local: false,
-                            tq: entry.metric || 255,
+            });
+
+            topology.forEach(entry => {
+                if (entry.router && entry.neighbor && entry.label !== "TT") {
+                    const src = entry.router;
+                    const dst = entry.neighbor;
+
+                    if (!nodeMap[src]) {
+                        nodeMap[src] = {
+                            id: src,
+                            label: shortenMac(src),
+                            local: src === localMac,
+                            tq: 255,
                         };
-                        nodes.push(nodeMap[entry.neighbor]);
+                        nodes.push(nodeMap[src]);
                     }
-                    const tq = entry.metric || 255;
+                    if (!nodeMap[dst]) {
+                        nodeMap[dst] = {
+                            id: dst,
+                            label: shortenMac(dst),
+                            local: false,
+                            tq: 255,
+                        };
+                        nodes.push(nodeMap[dst]);
+                    }
+
+                    const metric = parseFloat(entry.label) || 1.0;
+                    const tq = Math.round((1 / metric) * 255);
                     links.push({
-                        source: mac,
-                        target: entry.neighbor,
+                        source: src,
+                        target: dst,
                         tq: tq,
                         cls: linkClass(tq),
                     });
                 }
             });
 
+            if (localMac && !nodeMap[localMac]) {
+                nodeMap[localMac] = {
+                    id: localMac,
+                    label: shortenMac(localMac),
+                    local: true,
+                    tq: 255,
+                };
+                nodes.push(nodeMap[localMac]);
+            }
+
             if (nodes.length === 0) {
                 g.selectAll("*").remove();
+                simulation = null;
                 return;
             }
 
             const w = width();
             const h = height();
 
-            if (simulation) simulation.stop();
+            if (simulation) {
+                const oldNodes = {};
+                simulation.nodes().forEach(n => { oldNodes[n.id] = n; });
+                nodes.forEach(n => {
+                    if (oldNodes[n.id]) {
+                        n.x = oldNodes[n.id].x;
+                        n.y = oldNodes[n.id].y;
+                        n.vx = oldNodes[n.id].vx;
+                        n.vy = oldNodes[n.id].vy;
+                    }
+                });
+                simulation.stop();
+            }
 
             simulation = d3.forceSimulation(nodes)
-                .force("link", d3.forceLink(links).id(d => d.id).distance(120))
-                .force("charge", d3.forceManyBody().strength(-300))
+                .force("link", d3.forceLink(links).id(d => d.id).distance(150).strength(0.8))
+                .force("charge", d3.forceManyBody().strength(-400))
                 .force("center", d3.forceCenter(w / 2, h / 2))
-                .force("collision", d3.forceCollide(30));
+                .force("collision", d3.forceCollide(40))
+                .alphaDecay(0.05);
 
             g.selectAll("*").remove();
 
-            const link = g.append("g")
-                .selectAll("line")
-                .data(links)
+            const linkG = g.append("g");
+            const nodeG = g.append("g");
+
+            const link = linkG.selectAll("line")
+                .data(links, d => `${d.source.id || d.source}-${d.target.id || d.target}`)
                 .join("line")
                 .attr("class", d => `link-line ${d.cls}`);
 
-            const node = g.append("g")
-                .selectAll("g")
-                .data(nodes)
+            const node = nodeG.selectAll("g")
+                .data(nodes, d => d.id)
                 .join("g")
                 .call(d3.drag()
                     .on("start", (e, d) => {
@@ -470,19 +524,19 @@
                 );
 
             node.append("circle")
-                .attr("r", d => d.local ? 16 : 12)
+                .attr("r", d => d.local ? 18 : 14)
                 .attr("fill", d => d.local ? "#4fc3f7" : "#81c784")
                 .attr("stroke", "#0a0e17")
-                .attr("stroke-width", 2)
+                .attr("stroke-width", 3)
                 .attr("class", "node-circle");
 
             node.append("text")
-                .attr("dy", -20)
+                .attr("dy", -24)
                 .attr("class", "node-label")
-                .text(d => d.label);
+                .text(d => d.local ? "YOU (" + d.label + ")" : d.label);
 
             node.append("text")
-                .attr("dy", 4)
+                .attr("dy", 5)
                 .attr("class", "node-ip-label")
                 .style("font-size", "9px")
                 .style("fill", "#0a0e17")
@@ -500,12 +554,12 @@
         }
 
         updateAll();
-        setInterval(updateAll, 2000);
+        setInterval(updateAll, 3000);
 
         window.addEventListener("resize", () => {
             if (simulation) {
                 simulation.force("center", d3.forceCenter(width() / 2, height() / 2));
-                simulation.alpha(0.3).restart();
+                simulation.alpha(0.1).restart();
             }
         });
     </script>

@@ -70,14 +70,52 @@ detect_interface() {
 # Stop existing services
 stop_existing() {
     log "Stopping existing network services..."
-    if command -v nmcli &>/dev/null; then
-        nmcli device set "$PHYS_IFACE" managed no 2>/dev/null || true
-    fi
+
+    # Kill any hotspot/AP that NetworkManager may auto-restart
     pkill -f hostapd 2>/dev/null || true
     pkill -f wpa_supplicant 2>/dev/null || true
+    systemctl stop hostapd 2>/dev/null || true
+    systemctl stop wpa_supplicant 2>/dev/null || true
+
+    # Disable NetworkManager from managing this interface
+    if command -v nmcli &>/dev/null; then
+        nmcli device set "$PHYS_IFACE" managed no 2>/dev/null || true
+        # Also disconnect to prevent auto-reconnect/hotspot
+        nmcli device disconnect "$PHYS_IFACE" 2>/dev/null || true
+    fi
+
+    # Clean up any existing mesh state
     batctl if del bat0 2>/dev/null || true
+    ip addr flush dev bat0 2>/dev/null || true
+    ip link set bat0 down 2>/dev/null || true
+
+    # Leave any existing IBSS/mesh network and flush IPs
+    ip addr flush dev "$PHYS_IFACE" 2>/dev/null || true
+    iw dev "$PHYS_IFACE" ibss leave 2>/dev/null || true
     ip link set "$PHYS_IFACE" down 2>/dev/null || true
     sleep 1
+}
+
+# Check WiFi adapter health (no driver reload - that leaks phy devices)
+check_adapter_health() {
+    log "Checking WiFi adapter health..."
+
+    local txpower
+    txpower=$(iw dev "$PHYS_IFACE" info 2>/dev/null | grep "txpower" | awk '{print $2}')
+
+    if [ -z "$txpower" ]; then
+        warn "Could not read txpower, skipping check"
+        return
+    fi
+
+    log "Current txpower: ${txpower} dBm"
+
+    if [ "$txpower" = "-100.00" ] || [ "$txpower" = "-100" ]; then
+        warn "txpower is ${txpower} dBm - known Realtek quirk in managed mode, not a real problem"
+        warn "If tx_dropped increases rapidly after IBSS join, the adapter may need a power-cycle"
+    fi
+
+    log "Adapter check complete: txpower=${txpower} dBm"
 }
 
 # Setup Ad-hoc mode (IBSS) with fixed BSSID
@@ -85,6 +123,15 @@ setup_ibss() {
     log "Setting up Ad-hoc mode (IBSS)..."
 
     local freq=$((2412 + (${MESH_CHANNEL:-6} - 1) * 5))
+
+    # Ensure rfkill is unblocked
+    rfkill unblock wifi 2>/dev/null || true
+
+    # Stop NetworkManager from interfering
+    if command -v nmcli &>/dev/null; then
+        nmcli device set "$PHYS_IFACE" managed no 2>/dev/null || true
+        nmcli device disconnect "$PHYS_IFACE" 2>/dev/null || true
+    fi
 
     # Step 1: Interface must be DOWN to change type
     ip link set "$PHYS_IFACE" down 2>/dev/null || true
@@ -100,10 +147,38 @@ setup_ibss() {
 
     # Step 4: Join with FIXED BSSID so both nodes are in the same IBSS
     log "Joining IBSS: $MESH_ID on channel ${MESH_CHANNEL:-6} (${freq} MHz) BSSID $MESH_BSSID..."
-    iw dev "$PHYS_IFACE" ibss join "$MESH_ID" "$freq" fixed-freq "$MESH_BSSID" \
-        || error "Failed to join IBSS network"
 
+    # Try iw first with fixed-freq, then fall back to iwconfig for drivers that ignore it
+    local joined_bssid=""
+    iw dev "$PHYS_IFACE" ibss join "$MESH_ID" "$freq" fixed-freq "$MESH_BSSID" 2>/dev/null || true
     sleep 2
+
+    # Check if the BSSID matches
+    joined_bssid=$(iw dev "$PHYS_IFACE" link 2>/dev/null | grep -i "IBSS\|Joined" | awk '{print $NF}' | tr '[:lower:]' '[:upper:]')
+    local target_bssid=$(echo "$MESH_BSSID" | tr '[:lower:]' '[:upper:]')
+
+    if [ "$joined_bssid" = "$target_bssid" ]; then
+        log "IBSS joined with correct BSSID: $MESH_BSSID"
+    else
+        warn "iw fixed-freq ignored by driver (got $joined_bssid, expected $target_bssid)"
+        warn "Falling back to iwconfig to force BSSID..."
+
+        ip link set "$PHYS_IFACE" down 2>/dev/null || true
+        sleep 1
+        iwconfig "$PHYS_IFACE" mode ad-hoc 2>/dev/null || true
+        ip link set "$PHYS_IFACE" up 2>/dev/null || true
+        sleep 1
+        iwconfig "$PHYS_IFACE" essid "$MESH_ID" channel "${MESH_CHANNEL:-6}" ap "$MESH_BSSID" 2>/dev/null \
+            || error "Failed to join IBSS with iwconfig"
+        sleep 2
+
+        joined_bssid=$(iw dev "$PHYS_IFACE" link 2>/dev/null | grep -i "IBSS\|Joined" | awk '{print $NF}' | tr '[:lower:]' '[:upper:]')
+        if [ "$joined_bssid" = "$target_bssid" ]; then
+            log "IBSS joined via iwconfig with correct BSSID: $MESH_BSSID"
+        else
+            warn "BSSID still mismatched ($joined_bssid vs $target_bssid), continuing anyway..."
+        fi
+    fi
 
     # Verify
     if iw dev "$PHYS_IFACE" link 2>/dev/null | grep -qi "IBSS\|Joined"; then
@@ -118,6 +193,9 @@ setup_ibss() {
 # Setup batman-adv with correct routing algo
 setup_batman() {
     log "Setting up batman-adv..."
+
+    # Ensure rfkill is still unblocked
+    rfkill unblock wifi 2>/dev/null || true
 
     # Unload module if already loaded (to apply routing_algo at load time)
     rmmod batman_adv 2>/dev/null || true
@@ -223,6 +301,7 @@ main() {
     load_config
     detect_interface
     stop_existing
+    check_adapter_health
     setup_ibss
     setup_batman
     configure_ip

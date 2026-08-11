@@ -48,6 +48,17 @@ source "$CONFIG_FILE"
 
 log "Starting Batman-Adv mesh network..."
 
+# Ensure /usr/sbin is in PATH (iw, iwconfig may be there)
+export PATH="$PATH:/usr/sbin"
+
+# Unblock WiFi in case rfkill is blocking it at boot
+rfkill unblock wifi 2>/dev/null || true
+
+# Disable NetworkManager from managing the mesh interface
+if command -v nmcli &>/dev/null && [ -n "$PHYS_IFACE" ]; then
+    nmcli device set "$PHYS_IFACE" managed no 2>/dev/null || true
+fi
+
 # Load kernel modules
 log "Loading kernel modules..."
 modprobe batman_adv || error "Failed to load batman_adv module"
