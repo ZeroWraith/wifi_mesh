@@ -11,5 +11,5 @@ ExecStop=/opt/mesh/stop_mesh.sh
 StandardOutput=journal
 StandardError=journal
 
-[Install]
-WantedBy=multi-user.target
+# [Install]
+# WantedBy=multi-user.target  # Disabled: WiFi stays in managed mode at boot
