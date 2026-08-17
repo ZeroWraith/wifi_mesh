@@ -2,13 +2,13 @@
 
 Welcome to the documentation for the batman-adv drone mesh network system.
 
-This project enables true peer-to-peer WiFi mesh networking for drone swarms using the batman-adv Linux kernel module. Every drone is an identical peer with no hierarchy — the mesh self-heals and reroutes automatically.
+This project enables true peer-to-peer WiFi mesh networking for drone swarms using the batman-adv Linux kernel module, controlled by the `meshd` control-plane daemon. Every node runs identical configuration — no hierarchy, no central controller — and the mesh self-heals and reroutes automatically.
 
 ## Quick Links
 
 - **[Getting Started](Getting-Started.md)** — first-time setup walkthrough
-- **[Script Reference](Script-Reference.md)** — documentation for all scripts
-- **[Configuration](Configuration.md)** — config.sh parameter reference
+- **[Configuration](Configuration.md)** — `mesh.yaml` parameter reference
+- **[Monitoring](Monitoring.md)** — `meshctl status`, dashboard, batctl commands
 - **[Troubleshooting](Troubleshooting.md)** — common issues and debugging
 
 ## Documentation Index
@@ -17,7 +17,7 @@ This project enables true peer-to-peer WiFi mesh networking for drone swarms usi
 | Page | Description |
 |------|-------------|
 | [Getting Started](Getting-Started.md) | Step-by-step first-time setup for drones and ground station |
-| [Configuration](Configuration.md) | Full reference for config.sh parameters |
+| [Configuration](Configuration.md) | Full reference for `mesh.yaml` parameters |
 | [Ad-Hoc Mode](Ad-Hoc-Mode.md) | Using IBSS mode when 802.11s is not supported |
 | [Ground Station](Ground-Station.md) | Ground station setup with web dashboard |
 | [Jetson Build](Jetson-Build.md) | Building batman-adv from source for Jetson Tegra |
@@ -25,15 +25,25 @@ This project enables true peer-to-peer WiFi mesh networking for drone swarms usi
 ### Usage & Monitoring
 | Page | Description |
 |------|-------------|
-| [Video Streaming](Video-Streaming.md) | GStreamer video sender/receiver configuration |
-| [Monitoring](Monitoring.md) | mesh_status.sh, batctl commands, and JSON output |
-| [Script Reference](Script-Reference.md) | Detailed documentation for every script |
+| [Video Streaming](Video-Streaming.md) | GStreamer video pipeline configuration via `meshd` |
+| [Monitoring](Monitoring.md) | `meshctl`, dashboard, batctl commands, and JSON output |
+| [Architecture](Architecture.md) | batman-adv protocol, OGM propagation, meshd lifecycle |
 
 ### Reference
 | Page | Description |
 |------|-------------|
-| [Architecture](Architecture.md) | batman-adv protocol, OGM propagation, multi-hop routing |
+| [Script Reference](Script-Reference.md) | `meshd` / `meshctl` CLI and install scripts |
 | [Troubleshooting](Troubleshooting.md) | Common issues, debugging, and reset procedures |
+
+## Components
+
+| Component | Purpose |
+|-----------|---------|
+| `meshd` | Daemon: data plane, lifecycle, QoS, services, control socket |
+| `meshctl` | Operator CLI: status, control, fleet discovery, remote RPC |
+| `mesh.yaml` | Declarative per-node configuration |
+| `deploy/units/meshd.service` | systemd unit |
+| `mesh_dashboard/` | Dashboard front-end (served by meshd) |
 
 ## Supported Hardware
 
@@ -49,5 +59,6 @@ This project enables true peer-to-peer WiFi mesh networking for drone swarms usi
 
 - Linux kernel with batman-adv support (or ability to build from source)
 - WiFi adapter supporting Ad-hoc (IBSS) mode
-- Python 3 + Flask (for dashboard)
+- Python 3.10+
 - GStreamer 1.x (for video streaming)
+- Optional: gpsd / alfred-gpsd (GPS distribution), pymavlink (MAVLink), Flask (dashboard)

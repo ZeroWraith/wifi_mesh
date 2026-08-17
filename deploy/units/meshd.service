@@ -1,0 +1,20 @@
+[Unit]
+Description=meshd — batman-adv drone mesh control plane
+After=systemd-modules-load.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=simple
+ExecStart=/opt/mesh/.venv/bin/meshd -c /opt/mesh/config/mesh.yaml
+Restart=on-failure
+RestartSec=3
+User=root
+# Slow, secure shutdown: let the daemon restore radios + data plane.
+TimeoutStopSec=60
+KillSignal=SIGTERM
+WorkingDirectory=/opt/mesh
+# MESH_MGMT_TOKEN overrides the token in mesh.yaml (see config.load_config).
+EnvironmentFile=-/etc/mesh/token.env
+
+[Install]
+WantedBy=multi-user.target

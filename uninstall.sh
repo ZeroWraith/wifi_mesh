@@ -53,7 +53,10 @@ if [ -f "$INSTALL_DIR/stop_mesh.sh" ]; then
 fi
 
 # Stop and disable systemd service
-log "Removing systemd service..."
+log "Removing systemd services..."
+systemctl stop meshd.service 2>/dev/null || true
+systemctl disable meshd.service 2>/dev/null || true
+rm -f /etc/systemd/system/meshd.service
 systemctl stop batman-mesh.service 2>/dev/null || true
 systemctl disable batman-mesh.service 2>/dev/null || true
 rm -f /etc/systemd/system/batman-mesh.service

@@ -1,0 +1,121 @@
+# =============================================================================
+# batman-adv drone mesh — node configuration (replaces demo config.sh)
+# =============================================================================
+# Copy this file to /opt/mesh/config/mesh.yaml on each node and edit the
+# node-unique fields: node.id and node.ip.
+#
+#   drone          (companion computer on the vehicle)
+#   ground-station (GCS PC — dashboard + video receiver + optional gateway)
+#   relay          (radio-only forwarding node)
+# =============================================================================
+
+node:
+  id: drone-01              # UNIQUE per node: [a-zA-Z0-9_-]
+  role: drone               # drone | ground-station | relay
+  ip: 10.0.0.3              # UNIQUE per node, on bat0
+  netmask: /24
+  hostname: null
+
+mesh:
+  id: drone-mesh            # SAME on all nodes (mesh-point id)
+  essid: drone-mesh         # SAME on all nodes (IBSS essid)
+  ibss_bssid: "02:12:34:56:78:9a"   # SAME on all nodes (fixed IBSS cell)
+  routing_algo: BATMAN_V    # BATMAN_V (throughput) | BATMAN_IV
+  orig_interval_ms: 1000    # OGM beacon interval
+  hop_penalty: 15
+  fragmentation: true
+  interface_routing: true   # REQUIRED for multi-radio nodes
+  network_coding: false
+  gateway: "off"            # "off" | "server" | "client"  (quote: YAML 1.1 parses 'off' as bool)
+  gateway_download_mbit: 100
+  gateway_upload_mbit: 100
+  external_iface: null      # e.g. eth0 — only used when gateway=server
+  dns_server: 8.8.8.8
+
+# --- Radio farm ----------------------------------------------------------
+# mode: auto = use 802.11s mesh point if the adapter supports it, else IBSS.
+# txpower_dbm is applied explicitly when set.
+radios:
+  - name: radioA
+    iface: auto             # 'auto' picks the first free wireless interface
+    mode: auto              # auto | mesh | ibss
+    band: 2.4g              # 2.4g | 5g | 6g
+    channel: 6
+    txpower_dbm: 20
+    mac: null
+    driver_options: ""      # e.g. "rtw88 rtw_channel=6" for quirky chipsets
+  # - name: radioB            # second radio for multi-band nodes
+  #   iface: auto
+  #   mode: auto
+  #   band: 5g
+  #   channel: 36
+  #   txpower_dbm: 20
+  #   mac: null
+  #   driver_options: ""
+
+# --- QoS (URLLC command & control + video priority) -----------------------
+qos:
+  enabled: true
+  classes:
+    - name: command_and_control
+      dscp: [CS6, EF]            # marked on these flows
+      matches:
+        - protocol: udp
+          dport: 14550:14555     # MAVLink telemetry
+        - protocol: tcp
+          dport: 14550:14555
+      rate: 2mbit
+      ceil: 8mbit
+      prio: 0                    # strictest class
+    - name: video
+      dscp: [AF41, AF42, AF43]
+      matches:
+        - protocol: udp
+          dport: 5000:5999       # RTP / video
+      rate: 20mbit
+      ceil: 40mbit
+      prio: 1
+    - name: best_effort
+      is_default: true           # everything else
+      prio: 2
+
+# --- Telemetry --------------------------------------------------------------
+telemetry:
+  gps:
+    enabled: true
+    device: null                 # null = auto-detect (/dev/ttyUSB0, /dev/ttyAMA0)
+    fixed_location: null         # "lat,lon,alt" for ground stations without GPS
+  mavlink:
+    enabled: false               # enable on drone-facing companion computers
+    fc_serial: /dev/ttyACM0
+    fc_baud: 921600
+    gcs_ip: 10.0.0.100
+    gcs_port: 14550
+    local_port: 14551
+    stream_rate_hz: 10
+
+# --- Video (GStreamer) -------------------------------------------------------
+video:
+  mode: "off"                     # "off" | "sender" | "receiver"  (quote 'off')
+  source_device: null           # auto-detect; or /dev/video0 / libcamera / nvidia
+  caps: "video/x-raw,width=1280,height=720,framerate=30/1"
+  bitrate_kbps: 4000
+  transport: unicast            # unicast | multicast (239.255.x.x)
+  fec: true                     # RTP ULP FEC
+  adaptive: true                # RTCP-driven adaptive bitrate
+  dest_ip: 10.0.0.100
+  dest_port: 5000
+  multicast_group: 239.255.77.77
+
+# --- Management (JSON-RPC over the mesh / meshctl) ---------------------------
+management:
+  token: change-me             # SET THIS (generate: meshctl token)
+  udp_port: 9000
+  bind_interface: bat0
+
+# --- Dashboard (Flask web UI, served by meshd) -------------------------------
+dashboard:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+  template_dir: null           # null = bundled dashboard template

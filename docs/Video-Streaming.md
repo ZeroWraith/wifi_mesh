@@ -1,15 +1,18 @@
 # Video Streaming
 
-Stream camera video over the batman-adv mesh network using GStreamer.
+Stream camera video over the batman-adv mesh network with the meshd GStreamer pipeline.
 
 > [Home](Home.md) > Video Streaming
 
 ## Overview
 
-Video is encoded as H.264 and sent over UDP through the mesh. The ground station receives and decodes the stream.
+`meshd` builds and supervises the `gst-launch-1.0` pipeline for you. Video is
+encoded as H.264 and sent over UDP through the mesh; the ground station
+receives and decodes the stream. `video.mode: sender` runs the encode/send
+pipeline, `video.mode: receiver` runs the receive/display pipeline.
 
 ```
-Camera -> GStreamer (H.264 encode) -> UDP -> Mesh -> GStreamer (decode) -> Display
+Camera -> [meshd video.mode=sender] H.264 -> UDP -> Mesh -> [meshd video.mode=receiver] -> Display
 ```
 
 **Bandwidth requirements:**
@@ -22,89 +25,102 @@ Camera -> GStreamer (H.264 encode) -> UDP -> Mesh -> GStreamer (decode) -> Displ
 
 ## Quick Start
 
-### Sender (on drone)
+### Sender (on the drone)
+
+Edit `/opt/mesh/config/mesh.yaml`:
+
+```yaml
+video:
+  mode: sender
+  source_device: /dev/video0   # or libcamera / nvidia / a file / test
+  bitrate_kbps: 4000
+  dest_ip: 10.0.0.100
+  dest_port: 5000
+```
 
 ```bash
-./mesh_video_sender.sh 10.0.0.100 5000 /path/to/video.mp4
+sudo systemctl restart meshd
+meshctl status                  # radios/video service listed under services
 ```
 
-### Receiver (on ground station)
+### Receiver (on the ground station)
+
+```yaml
+video:
+  mode: receiver
+  dest_port: 5000
+```
 
 ```bash
-./mesh_video_receiver.sh 5000
+sudo systemctl restart meshd
 ```
 
-## Sender Details
+`meshd` supervises the pipeline: if it crashes it restarts (up to 5 times with
+a 5s backoff before giving up — visible in `meshctl status`).
 
-`mesh_video_sender.sh` streams a video file in a loop:
+## Source Selection (`video.source_device`)
 
-```bash
-./mesh_video_sender.sh [DEST_IP] [PORT] [VIDEO_FILE]
+| Value | Source |
+|-------|--------|
+| `null` (auto) | First existing `/dev/video0..4`, else a test pattern |
+| `/dev/video0` | USB/HDMI camera via `v4l2src` |
+| `libcamera` | Raspberry Pi camera via `libcamerasrc` |
+| `nvidia` | Jetson `nvarguscamerasrc` + `nvv4l2h264enc` hardware encode |
+| `test` | `videotestsrc` test pattern (debugging) |
+| path to a file | Replay an H.264 media file (legacy demo behaviour, no transcode) |
 
-# Defaults:
-#   DEST_IP=10.0.0.100
-#   PORT=5000
-#   VIDEO_FILE=/home/pi/sample_video.mp4
+## Transport (`video.transport`)
+
+| Value | Description |
+|-------|-------------|
+| `unicast` | Sends to `dest_ip:dest_port` |
+| `multicast` | Sends to `multicast_group:dest_port` (239.0.0.0/8) |
+
+In `multicast` mode the receiver listens on the group:
+
+```yaml
+video:
+  mode: receiver
+  transport: multicast
+  multicast_group: 239.255.77.77
+  dest_port: 5000
 ```
 
-**GStreamer pipeline:**
+## FEC (`video.fec`)
+
+`fec: true` (default) inserts the RTP ULP FEC elements (`rtpulpfecenc` on the
+sender, `rtpulpfecdec` on the receiver). FEC packets share the RTP session and
+improve resilience over lossy mesh links:
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `fec` | `true` | Add ULP FEC elements |
+| `adaptive` | `true` | RTCP-driven adaptive bitrate (config metadata) |
+
+## Generated Pipelines
+
+For reference, meshd builds these `gst-launch-1.0` pipelines.
+
+### Sender (USB camera, unicast, no FEC)
 
 ```
-filesrc -> qtdemux -> h264parse -> rtph264pay -> udpsink
+gst-launch-1.0 -e v4l2src device=/dev/video0
+  ! video/x-raw,width=1280,height=720,framerate=30/1
+  ! videoconvert ! x264enc tune=zerolatency bitrate=4000 speed-preset=superfast
+  ! rtph264pay config-interval=1 pt=96
+  ! udpsink sync=false async=false host=10.0.0.100 port=5000
 ```
 
-Press Ctrl+C to stop. The script will replay the video in a loop.
-
-## Receiver Details
-
-`mesh_video_receiver.sh` receives and displays the H.264 stream:
-
-```bash
-./mesh_video_receiver.sh [PORT]
-
-# Default: PORT=5000
-```
-
-**GStreamer pipeline:**
+### Receiver (unicast, no FEC)
 
 ```
-udpsrc -> rtph264depay -> h264parse -> avdec_h264 -> videoconvert -> autovideosink
+gst-launch-1.0 -e udpsrc port=5000 caps="application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
+  ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert
+  ! autovideosink sync=false
 ```
 
-## Camera Types
-
-### Raspberry Pi Camera (libcamerasrc)
-
-```bash
-gst-launch-1.0 -v libcamerasrc \
-    ! video/x-raw,width=640,height=480,framerate=30/1 \
-    ! videoconvert \
-    ! x264enc tune=zerolatency bitrate=2000 speed-preset=superfast \
-    ! rtph264pay config-interval=1 \
-    ! udpsink host=10.0.0.100 port=5000
-```
-
-### Jetson Camera (nvarguscamerasrc)
-
-```bash
-gst-launch-1.0 -v nvarguscamerasrc \
-    ! video/x-raw,width=640,height=480,framerate=30/1 \
-    ! videoconvert \
-    ! nvv4l2h264enc bitrate=2000 \
-    ! rtph264pay config-interval=1 \
-    ! udpsink host=10.0.0.100 port=5000
-```
-
-### USB Camera (v4l2src)
-
-```bash
-gst-launch-1.0 -v v4l2src device=/dev/video0 \
-    ! video/x-raw,width=640,height=480,framerate=30/1 \
-    ! videoconvert \
-    ! x264enc tune=zerolatency bitrate=2000 speed-preset=superfast \
-    ! rtph264pay config-interval=1 \
-    ! udpsink host=10.0.0.100 port=5000
-```
+With `fec: true`, meshd inserts `! rtpulpfecenc ssrc=3000000001` (sender) and
+`! rtpjitterbuffer ! rtpulpfecdec ignore-out-of-order=true` (receiver).
 
 ## Receiving in Other Tools
 
@@ -134,4 +150,16 @@ ffplay udp://@:5000 -protocol_whitelist file,udp,rtp
 | Medium | 1280x720 | 4000 kbps | `tune=zerolatency speed-preset=superfast` |
 | High | 1920x1080 | 8000 kbps | `tune=zerolatency speed-preset=fast` |
 
-**Tip:** For real-time drone video, use "low" quality to minimize latency. Use "medium" or "high" only if mesh throughput supports it.
+Set resolution via `video.caps` and bitrate via `video.bitrate_kbps`:
+
+```yaml
+video:
+  mode: sender
+  caps: "video/x-raw,width=1920,height=1080,framerate=30/1"
+  bitrate_kbps: 8000
+```
+
+**Tip:** For real-time drone video, use "low" quality to minimize latency. Use
+"medium" or "high" only if mesh throughput supports it.
+
+**See also:** [Configuration](Configuration.md) · [Monitoring](Monitoring.md) · [Troubleshooting](Troubleshooting.md)

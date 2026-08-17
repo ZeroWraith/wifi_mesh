@@ -77,6 +77,7 @@ install_packages() {
             apt-get install -y \
                 batctl \
                 alfred \
+                batadv-vis \
                 iw \
                 wpasupplicant \
                 hostapd \
@@ -85,6 +86,7 @@ install_packages() {
                 iproute2 \
                 python3 \
                 python3-pip \
+                python3-venv \
                 gstreamer1.0-tools \
                 gstreamer1.0-plugins-base \
                 gstreamer1.0-plugins-good \
@@ -100,6 +102,7 @@ install_packages() {
             dnf install -y \
                 batctl \
                 alfred \
+                batadv-vis \
                 iw \
                 wpa_supplicant \
                 hostapd \
@@ -196,8 +199,17 @@ check_kernel_support() {
 # Install pymavlink for MAVLink
 install_pymavlink() {
     log "Installing pymavlink for MAVLink communication..."
-    
-    pip3 install pymavlink || warn "Failed to install pymavlink"
+
+    # Prefer the meshd venv if it exists (system pip is externally-managed
+    # on modern Debian/Ubuntu).
+    if [[ -x /opt/mesh/.venv/bin/pip ]]; then
+        /opt/mesh/.venv/bin/pip install pymavlink \
+            || warn "Failed to install pymavlink into /opt/mesh/.venv"
+    else
+        pip3 install pymavlink --break-system-packages \
+            || pip3 install pymavlink \
+            || warn "Failed to install pymavlink"
+    fi
 }
 
 # Install alfred-gpsd for GPS distribution

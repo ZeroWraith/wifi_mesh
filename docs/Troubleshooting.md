@@ -97,7 +97,7 @@ sudo batctl hop_penalty 20
 sudo iw dev wlp0s20f3 station dump
 
 # Change to a less congested channel
-# Edit config.sh: MESH_CHANNEL=11
+# Edit mesh.yaml: radios[].channel=11
 ```
 
 ### Gateway Not Selected
@@ -126,7 +126,7 @@ sudo batctl gw client
 # Check signal strength
 sudo iw dev wlp0s20f3 station dump | grep signal
 
-# Change channel (edit config.sh)
+# Change channel (edit mesh.yaml: radios[].channel)
 # Try channels 1, 6, or 11 for 2.4GHz
 
 # Check for interference
@@ -185,33 +185,25 @@ lsmod | grep -i ath  # For Atheros
 ### Reset Mesh (Keep System Running)
 
 ```bash
-# Stop everything
-sudo ./stop_adhoc.sh
+# Restart the meshd daemon — brings the data plane up fresh
+sudo systemctl restart meshd
 
-# Wait 5 seconds, then restart
-sudo ./setup_adhoc.sh
+# Verify
+meshctl status
 ```
 
 ### Full Reset
 
 ```bash
-# Stop services
-sudo systemctl stop batman-mesh
-sudo systemctl stop mesh-dashboard
-
-# Teardown mesh
-sudo ./stop_adhoc.sh
+# Stop meshd
+sudo systemctl stop meshd
 
 # Reload kernel module
 sudo rmmod batman_adv
 sudo modprobe batman_adv
 
-# Reconfigure
-sudo ./setup_adhoc.sh
-
-# Restart services
-sudo systemctl start batman-mesh
-sudo systemctl start mesh-dashboard
+# Restart
+sudo systemctl start meshd
 ```
 
 ### Nuclear Option
@@ -223,15 +215,18 @@ sudo reboot
 
 # Start fresh
 sudo ./install_packages.sh
-sudo ./setup_adhoc.sh
+sudo ./install.sh
 ```
 
 ## Getting Help
 
 ```bash
-# Check script help
-./setup_adhoc.sh --help
-./mesh_status.sh --help
+# Check the meshd service
+systemctl status meshd
+journalctl -u meshd -f
+
+# CLI help
+meshctl --help
 
 # View full guide
 cat BATMAN_ADV_DRONE_MESH_COMPLETE_GUIDE.md

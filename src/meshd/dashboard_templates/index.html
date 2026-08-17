@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Batman-Adv Mesh Dashboard</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #0a0e17;
+            color: #c8d6e5;
+            overflow: hidden;
+            height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #0f1923 0%, #1a2332 100%);
+            border-bottom: 1px solid #1e3a5f;
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 56px;
+        }
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            color: #e8f0fe;
+            letter-spacing: 0.5px;
+        }
+        .header h1 span { color: #4fc3f7; }
+        .status-bar {
+            display: flex;
+            gap: 20px;
+            font-size: 13px;
+        }
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4caf50;
+            animation: pulse 2s infinite;
+        }
+        .status-dot.offline { background: #f44336; animation: none; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .main {
+            display: flex;
+            height: calc(100vh - 56px);
+        }
+        .graph-container {
+            flex: 1;
+            position: relative;
+        }
+        #network-graph {
+            width: 100%;
+            height: 100%;
+        }
+        .sidebar {
+            width: 340px;
+            background: #0f1923;
+            border-left: 1px solid #1e3a5f;
+            overflow-y: auto;
+            padding: 16px;
+        }
+        .panel {
+            background: #151f2b;
+            border: 1px solid #1e3a5f;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            overflow: hidden;
+        }
+        .panel-header {
+            background: #1a2738;
+            padding: 10px 14px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #7eb8da;
+            border-bottom: 1px solid #1e3a5f;
+        }
+        .panel-body {
+            padding: 12px 14px;
+        }
+        .node-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #1e2d3d;
+        }
+        .node-item:last-child { border-bottom: none; }
+        .node-mac {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 12px;
+            color: #4fc3f7;
+        }
+        .node-info {
+            font-size: 11px;
+            color: #7eb8da;
+            margin-top: 2px;
+        }
+        .link-quality {
+            font-size: 12px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .link-strong { background: #1b5e20; color: #81c784; }
+        .link-medium { background: #e65100; color: #ffb74d; }
+        .link-weak { background: #b71c1c; color: #ef9a9a; }
+        .metric-bar {
+            width: 100%;
+            height: 4px;
+            background: #1e2d3d;
+            border-radius: 2px;
+            margin-top: 4px;
+            overflow: hidden;
+        }
+        .metric-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
+        .timestamp {
+            font-size: 11px;
+            color: #546e7a;
+            text-align: center;
+            padding: 8px;
+        }
+        .svg-container { width: 100%; height: 100%; }
+        .link-line {
+            stroke: #1e3a5f;
+            stroke-width: 2;
+            transition: stroke 0.3s, stroke-width 0.3s;
+        }
+        .link-line.strong { stroke: #4caf50; stroke-width: 3; }
+        .link-line.medium { stroke: #ff9800; stroke-width: 2; }
+        .link-line.weak { stroke: #f44336; stroke-width: 1.5; stroke-dasharray: 5,3; }
+        .node-circle {
+            cursor: pointer;
+            transition: r 0.2s;
+        }
+        .node-circle:hover { r: 18; }
+        .node-label {
+            font-family: 'SF Mono', monospace;
+            font-size: 11px;
+            fill: #c8d6e5;
+            text-anchor: middle;
+            pointer-events: none;
+        }
+        .node-ip-label {
+            font-size: 10px;
+            fill: #7eb8da;
+            text-anchor: middle;
+            pointer-events: none;
+        }
+        .legend {
+            position: absolute;
+            bottom: 16px;
+            left: 16px;
+            background: rgba(15, 25, 35, 0.9);
+            border: 1px solid #1e3a5f;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 11px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 4px 0;
+        }
+        .legend-line {
+            width: 24px;
+            height: 3px;
+            border-radius: 1px;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #546e7a;
+        }
+        .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+        .empty-state p { font-size: 13px; line-height: 1.6; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><span>BATMAN-ADV</span> Mesh Dashboard</h1>
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-dot" id="status-dot"></div>
+                <span id="status-text">Connecting...</span>
+            </div>
+            <div class="status-item">
+                Nodes: <strong id="node-count">0</strong>
+            </div>
+            <div class="status-item">
+                Local IP: <strong id="local-ip">--</strong>
+            </div>
+            <div class="status-item" id="timestamp"></div>
+        </div>
+    </div>
+
+    <div class="main">
+        <div class="graph-container">
+            <div class="svg-container" id="network-graph"></div>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-line" style="background:#4caf50"></div>
+                    <span>Strong link (>80%)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-line" style="background:#ff9800"></div>
+                    <span>Medium link (50-80%)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-line" style="background:#f44336; border-style:dashed"></div>
+                    <span>Weak link (<50%)</span>
+                </div>
+                <div class="legend-item">
+                    <svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="#4fc3f7" stroke="#0a0e17" stroke-width="2"/></svg>
+                    <span>This node</span>
+                </div>
+                <div class="legend-item">
+                    <svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="#81c784" stroke="#0a0e17" stroke-width="2"/></svg>
+                    <span>Remote node</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            <div class="panel">
+                <div class="panel-header">Network Overview</div>
+                <div class="panel-body">
+                    <div id="network-stats">
+                        <div class="empty-state">
+                            <p>Waiting for mesh data...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">Discovered Nodes</div>
+                <div class="panel-body">
+                    <div id="node-list">
+                        <div class="empty-state">
+                            <div class="icon">&#x1f4e1;</div>
+                            <p>Scanning for mesh nodes...<br>Make sure batman-adv is running on connected nodes.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">Direct Neighbors</div>
+                <div class="panel-body">
+                    <div id="neighbor-list">
+                        <div class="empty-state">
+                            <p>No direct neighbors found yet.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const width = () => document.querySelector('.graph-container').clientWidth;
+        const height = () => document.querySelector('.graph-container').clientHeight;
+
+        const svg = d3.select("#network-graph")
+            .append("svg")
+            .attr("width", "100%")
+            .attr("height", "100%");
+
+        const g = svg.append("g");
+
+        const zoom = d3.zoom()
+            .scaleExtent([0.2, 4])
+            .on("zoom", (event) => g.attr("transform", event.transform));
+        svg.call(zoom);
+
+        let simulation = null;
+        let lastTopologyHash = "";
+
+        function linkClass(tq) {
+            if (tq > 200) return "strong";
+            if (tq > 128) return "medium";
+            return "weak";
+        }
+
+        function linkColor(tq) {
+            if (tq > 200) return "#4caf50";
+            if (tq > 128) return "#ff9800";
+            return "#f44336";
+        }
+
+        function shortenMac(mac) {
+            if (!mac || mac === "??" || mac === "") return "";
+            const parts = mac.split(":");
+            if (parts.length < 2) return mac;
+            return parts.slice(-2).join(":");
+        }
+
+        async function fetchJSON(url) {
+            try {
+                const res = await fetch(url);
+                return await res.json();
+            } catch { return null; }
+        }
+
+        async function updateAll() {
+            const [status, topology] = await Promise.all([
+                fetchJSON("/api/mesh/status"),
+                fetchJSON("/api/mesh/topology"),
+            ]);
+
+            if (status) {
+                document.getElementById("node-count").textContent = status.node_count;
+                document.getElementById("local-ip").textContent = status.local_ip || "--";
+
+                const active = status.mesh_active;
+                document.getElementById("status-text").textContent =
+                    active ? "Mesh Active" : (status.bat0_up ? "No Neighbors" : "Mesh Down");
+                document.getElementById("status-dot").className =
+                    "status-dot" + (active ? "" : " offline");
+                document.getElementById("timestamp").textContent = status.timestamp;
+
+                updateNodeList(status.nodes);
+                updateNetworkStats(status);
+            }
+
+            if (topology) {
+                const hash = JSON.stringify(topology);
+                if (hash !== lastTopologyHash) {
+                    lastTopologyHash = hash;
+                    buildGraph(topology, status ? status.local_ip : null);
+                }
+            }
+
+            if (status && !status.mesh_active) {
+                g.selectAll("*").remove();
+                simulation = null;
+                lastTopologyHash = "";
+            }
+        }
+
+        function updateNetworkStats(status) {
+            const el = document.getElementById("network-stats");
+            if (status.node_count === 0) {
+                el.innerHTML = '<div class="empty-state"><p>No nodes detected</p></div>';
+                return;
+            }
+            el.innerHTML = `
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                    <div style="text-align:center;padding:8px;background:#1a2738;border-radius:6px;">
+                        <div style="font-size:24px;font-weight:700;color:#4fc3f7;">${status.node_count}</div>
+                        <div style="font-size:11px;color:#7eb8da;">Total Nodes</div>
+                    </div>
+                    <div style="text-align:center;padding:8px;background:#1a2738;border-radius:6px;">
+                        <div style="font-size:24px;font-weight:700;color:#81c784;">${status.neighbor_count}</div>
+                        <div style="font-size:11px;color:#7eb8da;">Neighbors</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function updateNodeList(nodes) {
+            const el = document.getElementById("node-list");
+            if (!nodes || nodes.length === 0) {
+                el.innerHTML = '<div class="empty-state"><div class="icon">&#x1f4e1;</div><p>No nodes discovered yet</p></div>';
+                return;
+            }
+            el.innerHTML = nodes.map(n => {
+                const tq = n.tq || 0;
+                const pct = Math.round((tq / 255) * 100);
+                const isStale = n.stale;
+                const cls = isStale ? "link-weak" : (pct > 80 ? "link-strong" : pct > 50 ? "link-medium" : "link-weak");
+                const macLabel = shortenMac(n.mac) || "unknown";
+                const viaLabel = shortenMac(n.nexthop);
+                const viaText = viaLabel ? `via ${viaLabel} | ` : "";
+                const staleText = isStale ? ` <span style="color:#f44336;">OFFLINE (${Math.round(n.last_seen_ms/1000)}s ago)</span>` : "";
+                return `
+                    <div class="node-item">
+                        <div>
+                            <div class="node-mac">${macLabel}${staleText}</div>
+                            <div class="node-info">${viaText}${n.outgoing_interface || ""}</div>
+                            <div class="metric-bar">
+                                <div class="metric-fill" style="width:${pct}%;background:${isStale ? '#f44336' : linkColor(tq)}"></div>
+                            </div>
+                        </div>
+                        <span class="link-quality ${cls}">${isStale ? "DOWN" : pct + "%"}</span>
+                    </div>
+                `;
+            }).join("");
+        }
+
+        function buildGraph(topology, localIp) {
+            const nodeMap = {};
+            const nodes = [];
+            const links = [];
+            let localMac = null;
+
+            if (!topology || !Array.isArray(topology) || topology.length === 0) {
+                g.selectAll("*").remove();
+                simulation = null;
+                return;
+            }
+
+            topology.forEach(entry => {
+                if (entry.primary) {
+                    localMac = entry.primary;
+                }
+            });
+
+            topology.forEach(entry => {
+                if (entry.router && entry.neighbor && entry.label !== "TT") {
+                    const src = entry.router;
+                    const dst = entry.neighbor;
+
+                    if (!nodeMap[src]) {
+                        nodeMap[src] = {
+                            id: src,
+                            label: shortenMac(src),
+                            local: src === localMac,
+                            tq: 255,
+                        };
+                        nodes.push(nodeMap[src]);
+                    }
+                    if (!nodeMap[dst]) {
+                        nodeMap[dst] = {
+                            id: dst,
+                            label: shortenMac(dst),
+                            local: false,
+                            tq: 255,
+                        };
+                        nodes.push(nodeMap[dst]);
+                    }
+
+                    const metric = parseFloat(entry.label) || 1.0;
+                    const tq = Math.round((1 / metric) * 255);
+                    links.push({
+                        source: src,
+                        target: dst,
+                        tq: tq,
+                        cls: linkClass(tq),
+                    });
+                }
+            });
+
+            if (localMac && !nodeMap[localMac]) {
+                nodeMap[localMac] = {
+                    id: localMac,
+                    label: shortenMac(localMac),
+                    local: true,
+                    tq: 255,
+                };
+                nodes.push(nodeMap[localMac]);
+            }
+
+            if (nodes.length === 0) {
+                g.selectAll("*").remove();
+                simulation = null;
+                return;
+            }
+
+            const w = width();
+            const h = height();
+
+            if (simulation) {
+                const oldNodes = {};
+                simulation.nodes().forEach(n => { oldNodes[n.id] = n; });
+                nodes.forEach(n => {
+                    if (oldNodes[n.id]) {
+                        n.x = oldNodes[n.id].x;
+                        n.y = oldNodes[n.id].y;
+                        n.vx = oldNodes[n.id].vx;
+                        n.vy = oldNodes[n.id].vy;
+                    }
+                });
+                simulation.stop();
+            }
+
+            simulation = d3.forceSimulation(nodes)
+                .force("link", d3.forceLink(links).id(d => d.id).distance(150).strength(0.8))
+                .force("charge", d3.forceManyBody().strength(-400))
+                .force("center", d3.forceCenter(w / 2, h / 2))
+                .force("collision", d3.forceCollide(40))
+                .alphaDecay(0.05);
+
+            g.selectAll("*").remove();
+
+            const linkG = g.append("g");
+            const nodeG = g.append("g");
+
+            const link = linkG.selectAll("line")
+                .data(links, d => `${d.source.id || d.source}-${d.target.id || d.target}`)
+                .join("line")
+                .attr("class", d => `link-line ${d.cls}`);
+
+            const node = nodeG.selectAll("g")
+                .data(nodes, d => d.id)
+                .join("g")
+                .call(d3.drag()
+                    .on("start", (e, d) => {
+                        if (!e.active) simulation.alphaTarget(0.3).restart();
+                        d.fx = d.x; d.fy = d.y;
+                    })
+                    .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+                    .on("end", (e, d) => {
+                        if (!e.active) simulation.alphaTarget(0);
+                        d.fx = null; d.fy = null;
+                    })
+                );
+
+            node.append("circle")
+                .attr("r", d => d.local ? 18 : 14)
+                .attr("fill", d => d.local ? "#4fc3f7" : "#81c784")
+                .attr("stroke", "#0a0e17")
+                .attr("stroke-width", 3)
+                .attr("class", "node-circle");
+
+            node.append("text")
+                .attr("dy", -24)
+                .attr("class", "node-label")
+                .text(d => d.local ? "YOU (" + d.label + ")" : d.label);
+
+            node.append("text")
+                .attr("dy", 5)
+                .attr("class", "node-ip-label")
+                .style("font-size", "9px")
+                .style("fill", "#0a0e17")
+                .style("font-weight", "bold")
+                .text(d => d.local ? "YOU" : "");
+
+            simulation.on("tick", () => {
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+                node.attr("transform", d => `translate(${d.x},${d.y})`);
+            });
+        }
+
+        updateAll();
+        setInterval(updateAll, 3000);
+
+        window.addEventListener("resize", () => {
+            if (simulation) {
+                simulation.force("center", d3.forceCenter(width() / 2, height() / 2));
+                simulation.alpha(0.1).restart();
+            }
+        });
+    </script>
+</body>
+</html>

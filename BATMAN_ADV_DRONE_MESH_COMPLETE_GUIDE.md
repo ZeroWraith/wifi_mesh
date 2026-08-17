@@ -15,7 +15,7 @@
 7. [MAVLink Integration](#7-mavlink-integration)
 8. [Video Streaming Over Mesh](#8-video-streaming-over-mesh)
 9. [GPS Distribution via Alfred-GPSD](#9-gps-distribution-via-alfred-gpsd)
-10. [Network Visualization from Ground Station](#10-network-visualization-from-ground-station)
+10. [Network Visualization & Dashboard](#10-network-visualization--dashboard)
 11. [Performance Tuning](#11-performance-tuning)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Ad-Hoc (IBSS) Mode](#13-ad-hoc-ibss-mode)
@@ -62,6 +62,11 @@ Every drone:
   ✓ Can be a gateway for internet access
 ```
 
+`meshd` is the **control-plane daemon** that owns this data plane on each node.
+It reads one declarative `mesh.yaml` and brings up radios, bat0, QoS,
+management plane, and optional services (telemetry, video, dashboard) — so
+every node converges on the same state from the same config.
+
 ### 1.4 Supported Hardware
 
 | Device | CPU | RAM | WiFi Support | Role |
@@ -95,8 +100,15 @@ TRUE PEER MESH (No Hierarchy):
 
 Every node can reach every other node via multi-hop.
 No static routes. No manual configuration.
-Batman-adv handles all routing automatically.
+meshd brings up the data plane; batman-adv handles all routing.
 ```
+
+**Two planes:**
+
+| Plane | Responsibility | Implemented by |
+|-------|----------------|----------------|
+| **Data plane** | Radios, bat0, forwarding, QoS `tc` shaping | Kernel + `batctl`/`tc`, orchestrated by meshd |
+| **Control plane** | Lifecycle, services, management RPC, fleet discovery | `meshd` daemon, `meshctl` CLI, JSON-RPC over the mesh |
 
 ---
 
@@ -128,6 +140,8 @@ Every node broadcasts OGMs periodically (default: 1 second):
 5. C compares: direct to A (if possible) vs via B
 6. C selects best path based on throughput metric
 
+Set `mesh.orig_interval_ms` in `mesh.yaml` to change the interval.
+
 ### 2.2 BATMAN-V Algorithm
 
 BATMAN-V uses throughput-based routing:
@@ -141,6 +155,8 @@ metric = throughput × (1 - packet_loss) / hop_count
 - Neighbor discovery without OGM flooding
 - Measures actual throughput between direct neighbors
 - Reduces overhead compared to BATMAN-IV
+
+Set `mesh.routing_algo: BATMAN_V` in `mesh.yaml`.
 
 ### 2.3 Multi-Hop Routing Example
 
@@ -186,6 +202,9 @@ Gateway Selection Example:
   Node3      100/100      180    18000
 ```
 
+Enable a gateway node with `mesh.gateway: server` and optional
+`mesh.external_iface` in `mesh.yaml`.
+
 ---
 
 ## 3. Hardware Requirements
@@ -193,7 +212,7 @@ Gateway Selection Example:
 ### 3.1 Per Drone
 
 - **Companion Computer**: Raspberry Pi 4/5 OR Jetson Nano/Orin
-- **WiFi Adapter**: Must support 802.11s mesh point mode
+- **WiFi Adapter**: Must support 802.11s mesh point mode (or IBSS)
 - **Flight Controller**: Pixhawk, CubePilot, or compatible
 - **Camera**: Pi Camera, USB camera, or Jetson camera module
 - **GPS Module**: Optional, for alfred-gpsd position distribution
@@ -250,14 +269,29 @@ GPS            → UART or USB
 
 | Package | Purpose |
 |---------|---------|
-| `kmod-batman-adv` | Batman-adv kernel module |
 | `batctl` | Batman-adv control tool |
+| `batman-adv` (kernel) | Layer 2 mesh routing module |
 | `wpad-mesh-wolfssl` | 802.11s SAE authentication |
 | `alfred` | Distributed data exchange |
+| `alfred-gpsd` | GPS position distribution |
+| `batadv-vis` | Topology visualization |
 | `gpsd` | GPS daemon |
-| `gpsd-clients` | GPS utilities |
+| `python3-venv` | meshd virtualenv |
 
-### 4.2 Video Streaming
+### 4.2 meshd Dependencies
+
+`meshd` is a Python package with optional extras:
+
+| Extra | Package | Purpose |
+|-------|---------|---------|
+| (core) | — | Data plane, lifecycle, QoS, management |
+| `telemetry` | `pymavlink` | MAVLink forwarding (flight controller) |
+| `dashboard` | `flask` | Web dashboard |
+
+GStreamer is used out-of-band for the video service (installed as a system
+package).
+
+### 4.3 Video Streaming
 
 | Package | Purpose |
 |---------|---------|
@@ -267,46 +301,51 @@ GPS            → UART or USB
 | `gstreamer1.0-plugins-bad` | Bad GStreamer plugins |
 | `gstreamer1.0-libav` | Libav GStreamer plugins |
 
-### 4.3 MAVLink
+### 4.4 Installation
 
-| Package | Purpose |
-|---------|---------|
-| `python3-pip` | Python package manager |
-| `pymavlink` | Python MAVLink library |
+**One command (Debian/Ubuntu, Fedora/RHEL, Arch):**
 
-### 4.4 Installation Commands
-
-**Raspberry Pi OS:**
 ```bash
-sudo apt update
-sudo apt install -y batctl kmod-batman-adv wpad-mesh-wolfssl \
-    alfred gpsd gpsd-clients \
-    gstreamer1.0-tools gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly gstreamer1.0-libav \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    libcamera-dev libcamera-apps-lite \
-    python3-pip
-pip3 install pymavlink
+git clone <your-repo> && cd <your-repo>
+sudo ./install_packages.sh   # OS packages + kernel modules
+sudo ./install.sh            # pip-install meshd into /opt/mesh/.venv, enable systemd
 ```
 
-**Jetson (JetPack/Ubuntu):**
+Or install `meshd` extras selectively:
+
 ```bash
-sudo apt update
-sudo apt install -y batctl kmod-batman-adv wpad-mesh-wolfssl \
-    alfred gpsd gpsd-clients \
-    gstreamer1.0-tools gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly gstreamer1.0-libav \
-    python3-pip
-pip3 install pymavlink
+sudo ./install.sh --with-telemetry   # + pymavlink
+sudo ./install.sh --with-dashboard   # + flask
+sudo ./install.sh --with-all         # everything
 ```
 
 ---
 
 ## 5. Step-by-Step Mesh Configuration
 
-### 5.1 Check WiFi Mesh Support
+### 5.1 Generate the Config
+
+```bash
+meshd --init -c /opt/mesh/config/mesh.yaml
+# or the install script already wrote a default file
+```
+
+Every node runs **identical configuration except `node.id` and `node.ip`**:
+
+| Setting | Value | Same on All? |
+|---------|-------|--------------|
+| `mesh.id` / `mesh.essid` | `drone-mesh` | YES |
+| `mesh.ibss_bssid` | `02:12:34:56:78:9a` | YES |
+| `radios[].channel` / band | e.g. channel 6, 2.4g | YES |
+| `mesh.routing_algo` | BATMAN_V | YES |
+| `mesh.orig_interval_ms` | 1000 | YES |
+| `mesh.hop_penalty` | 15 | YES |
+| `mesh.fragmentation` | true | YES |
+| `management.token` | (shared secret) | YES |
+| `node.ip` | `10.0.0.X` | UNIQUE per node |
+| `node.id` | `drone-XX` | UNIQUE per node |
+
+### 5.2 Verify WiFi Mesh Support
 
 ```bash
 # Verify mesh point support
@@ -316,115 +355,83 @@ iw phy | grep -A10 "Supported interface modes"
 #     * mesh point
 ```
 
-### 5.2 Create Mesh Interface
+### 5.3 Create the Mesh Interface
 
-```bash
-# Bring down wlan0 temporarily
-sudo ip link set wlan0 down
+`meshd` handles this automatically from `radios[]` — with 802.11s SAE
+authentication, channel and TX power set from config:
 
-# Create mesh interface with SAE authentication
-# mesh_id must be IDENTICAL on all drones
-sudo iw dev wlan0 interface add mesh0 type mesh mesh_id drone-swarm-001
-
-# Set channel (2.4 GHz channel 1)
-sudo iw dev mesh0 set channel 1
-
-# Set TX power (optional, depends on adapter)
-sudo iw dev mesh0 set txpower fixed 2000  # 20 dBm
-
-# Bring up mesh interface
-sudo ip link set mesh0 up
-
-# Verify interface exists
-ip link show mesh0
+```yaml
+radios:
+  - name: radioA
+    iface: auto          # auto-detects the first free wireless interface
+    mode: auto           # auto | mesh (802.11s) | ibss
+    band: 2.4g
+    channel: 6
+    txpower_dbm: 20
 ```
 
-### 5.3 Configure WPA Supplicant for SAE
+Equivalent manual commands (for reference):
 
 ```bash
-# Create WPA supplicant config for mesh
-sudo tee /etc/wpa_supplicant/wpa_supplicant_mesh.conf << 'EOF'
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-
-network={
-    ssid="drone-swarm-001"
-    key_mgmt=SAE
-    psk="your-secure-password-here"
-    mode=5
-    frequency=2412
-    mesh_fwding=0
-    mesh_ttl=1
-}
-EOF
-
-# Start WPA supplicant for mesh
-sudo wpa_supplicant -i mesh0 -c /etc/wpa_supplicant/wpa_supplicant_mesh.conf -D nl80211 &
-
-# Wait for association
-sleep 5
-
-# Verify mesh peering
-sudo iw dev mesh0 station dump
-# Look for "mesh plink: ESTAB" for connected peers
+sudo ip link set wlan0 down
+sudo iw dev wlan0 interface add mesh0 type mesh mesh_id drone-mesh
+sudo iw dev mesh0 set channel 1
+sudo iw dev mesh0 set txpower fixed 2000
+sudo ip link set mesh0 up
 ```
 
 ### 5.4 Configure Batman-Adv
 
+`meshd` loads the module, adds the interface, and applies the routing profile:
+
+```yaml
+mesh:
+  routing_algo: BATMAN_V
+  orig_interval_ms: 1000
+  hop_penalty: 15
+  fragmentation: true
+  interface_routing: true
+```
+
+Equivalent manual commands (for reference):
+
 ```bash
-# Load batman-adv kernel module
 sudo modprobe batman-adv
-
-# Verify module loaded
-lsmod | grep batman
-
-# Add mesh interface to batman-adv
 sudo batctl if add mesh0
-
-# Verify interface added
-sudo batctl if
-# Should show: mesh0
-
-# Bring up bat0 interface
 sudo ip link set bat0 up
-
-# Set routing algorithm (BATMAN_V for drones)
 sudo batctl routing_algo BATMAN_V
-
-# Configure for mobility (drones move fast)
-sudo batctl orig_interval 1000    # OGM every 1 second
-sudo batctl hop_penalty 15        # Moderate penalty per hop
-sudo batctl fragmentation 1       # Enable fragmentation
-sudo batctl ap_isolation 0        # Allow client-to-client
-
-# Verify configuration
-sudo batctl o    # Should show empty until peers are found
-sudo batctl n    # Should show neighbors after OGM exchange
+sudo batctl orig_interval 1000
+sudo batctl hop_penalty 15
+sudo batctl fragmentation 1
+sudo batctl ap_isolation 0
 ```
 
 ### 5.5 Assign IP Address
 
-```bash
-# Each drone gets a UNIQUE IP in the same subnet
-# Format: 10.0.0.X where X is the drone number
+`meshd` assigns `node.ip` (e.g. `10.0.0.3/24`) to `bat0` automatically.
 
-# Drone 1:
-sudo ip addr add 10.0.0.1/24 dev bat0
-
-# Drone 2:
-sudo ip addr add 10.0.0.2/24 dev bat0
-
-# Drone 3:
-sudo ip addr add 10.0.0.3/24 dev bat0
-
-# Ground Station:
-sudo ip addr add 10.0.0.100/24 dev bat0
-
-# Verify IP assigned
-ip addr show bat0
+```yaml
+node:
+  id: drone-03
+  ip: 10.0.0.3
 ```
 
-### 5.6 Test Connectivity
+```
+Drone 1:    10.0.0.1
+Drone 2:    10.0.0.2
+Drone 3:    10.0.0.3
+Ground:     10.0.0.100
+```
+
+### 5.6 Start and Test Connectivity
+
+```bash
+sudo systemctl start meshd
+systemctl status meshd
+meshctl status
+```
+
+Then verify on any node:
 
 ```bash
 # From Drone 1, ping Drone 3 (may require multi-hop)
@@ -442,20 +449,18 @@ sudo batctl n
 sudo batctl traceroute 10.0.0.3
 ```
 
-### 5.7 Identical Configuration on ALL Drones
+### 5.7 Remote Fleet Management
 
-**EVERY drone runs IDENTICAL configuration except IP address:**
+Because the management plane runs over the mesh, any node can inspect any
+other node:
 
-| Setting | Value | Same on All? |
-|---------|-------|--------------|
-| mesh_id | drone-swarm-001 | YES |
-| PSK | your-secure-password | YES |
-| Channel | 1 (2.4 GHz) | YES |
-| routing_algo | BATMAN_V | YES |
-| orig_interval | 1000 | YES |
-| hop_penalty | 15 | YES |
-| fragmentation | 1 | YES |
-| IP address | 10.0.0.X | UNIQUE per drone |
+```bash
+meshctl nodes                          # list the whole fleet (alfred type 129)
+meshctl -d 10.0.0.3 status             # status of a specific drone
+meshctl -d 10.0.0.3 restart            # restart a remote drone's mesh
+```
+
+All management calls are token-authenticated (`management.token`).
 
 **No Hierarchy:**
 - Any drone can route traffic for any other
@@ -468,137 +473,46 @@ sudo batctl traceroute 10.0.0.3
 
 ## 6. Persistent Boot Configuration
 
-### 6.1 Systemd Service File
+### 6.1 The meshd Systemd Unit
 
-Create `/etc/systemd/system/drone-mesh.service`:
+`install.sh` installs `deploy/units/meshd.service`:
 
 ```ini
 [Unit]
-Description=Drone Batman-Adv Mesh Network
+Description=meshd — batman-adv drone mesh daemon
 After=network.target
 Wants=network.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/setup-drone-mesh.sh
-ExecStop=/usr/local/bin/teardown-drone-mesh.sh
-StandardOutput=journal
-StandardError=journal
+Type=simple
+ExecStart=/opt/mesh/.venv/bin/meshd -c /opt/mesh/config/mesh.yaml
+EnvironmentFile=/etc/mesh/token.env   # optional MESH_MGMT_TOKEN override
+Restart=always
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-### 6.2 Setup Script
-
-Create `/usr/local/bin/setup-drone-mesh.sh`:
+### 6.2 Enable at Boot
 
 ```bash
-#!/bin/bash
-# setup-drone-mesh.sh - Configure batman-adv mesh on boot
-
-set -e
-
-# Configuration (same on ALL drones)
-MESH_ID="drone-swarm-001"
-MESH_KEY="your-secure-password-here"
-CHANNEL=1
-ROUTING_ALGO="BATMAN_V"
-ORIG_INTERVAL=1000
-HOP_PENALTY=15
-
-# Get drone ID from hostname or config file
-DRONE_ID=$(hostname | grep -o '[0-9]*$')
-if [ -z "$DRONE_ID" ]; then
-    DRONE_ID=$(cat /etc/drone-id 2>/dev/null || echo "1")
-fi
-
-echo "Configuring mesh for drone ${DRONE_ID}..."
-
-# Load batman-adv module
-modprobe batman-adv
-
-# Create mesh interface
-iw dev wlan0 interface add mesh0 type mesh mesh_id ${MESH_ID}
-iw dev mesh0 set channel ${CHANNEL}
-
-# Configure WPA supplicant for SAE
-cat > /tmp/wpa_supplicant_mesh.conf << EOF
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-
-network={
-    ssid="${MESH_ID}"
-    key_mgmt=SAE
-    psk="${MESH_KEY}"
-    mode=5
-    frequency=$((2412 + (CHANNEL - 1) * 5))
-    mesh_fwding=0
-    mesh_ttl=1
-}
-EOF
-
-# Start WPA supplicant
-wpa_supplicant -i mesh0 -c /tmp/wpa_supplicant_mesh.conf -D nl80211 &
-sleep 3
-
-# Attach to batman-adv
-batctl if add mesh0
-
-# Bring up interfaces
-ip link set mesh0 up
-ip link set bat0 up
-
-# Configure routing
-batctl routing_algo ${ROUTING_ALGO}
-batctl orig_interval ${ORIG_INTERVAL}
-batctl hop_penalty ${HOP_PENALTY}
-batctl fragmentation 1
-
-# Assign IP address
-ip addr add 10.0.0.${DRONE_ID}/24 dev bat0
-
-# Start alfred for visualization
-alfred -i bat0 -b bat0 &
-batadv-vis -i bat0 -s &
-
-echo "Mesh configured for drone ${DRONE_ID} (10.0.0.${DRONE_ID})"
+sudo systemctl enable meshd
+sudo systemctl start meshd
 ```
 
-### 6.3 Teardown Script
+### 6.3 Lifecycle
 
-Create `/usr/local/bin/teardown-drone-mesh.sh`:
+`meshd` performs the full bring-up in order (see [Architecture](docs/Architecture.md)):
 
-```bash
-#!/bin/bash
-# teardown-drone-mesh.sh - Remove batman-adv mesh
+1. Load kernel modules (`batman_adv`, `cfg80211`, `mac80211`)
+2. Bring up each radio in `radios[]` (mesh point or IBSS)
+3. Create `bat0`, apply routing profile, assign `node.ip`
+4. Apply QoS `tc` classes
+5. Start supervised services (gpsd, alfred-gpsd, MAVLink forwarder, video, dashboard, management plane)
 
-# Stop services
-pkill alfred
-pkill batadv-vis
-pkill wpa_supplicant
-
-# Remove interfaces
-batctl if del mesh0
-ip link set bat0 down
-ip link set mesh0 down
-iw dev mesh0 del
-
-# Unload module
-rmmod batman_adv
-
-echo "Mesh torn down"
-```
-
-### 6.4 Enable Service
-
-```bash
-sudo chmod +x /usr/local/bin/setup-drone-mesh.sh
-sudo chmod +x /usr/local/bin/teardown-drone-mesh.sh
-sudo systemctl enable drone-mesh.service
-sudo systemctl start drone-mesh.service
-```
+Tear-down reverses the same steps; `systemctl stop meshd` restores radios to
+managed mode.
 
 ---
 
@@ -652,102 +566,37 @@ sudo /opt/nvidia/jetson-io/jetson-io.py
 # Configure header pins → UART
 ```
 
-### 7.3 Python MAVLink Forwarder
+### 7.3 MAVLink Forwarding via meshd
 
-Create `/usr/local/bin/mavlink-forwarder.py`:
+No custom scripts or systemd units needed — `meshd` runs a threaded MAVLink
+forwarder supervised by the daemon:
 
-```python
-#!/usr/bin/env python3
-"""MAVLink message forwarder via batman-adv mesh"""
-
-import socket
-import threading
-from pymavlink import mavutil
-
-# Configuration
-FC_SERIAL = '/dev/ttyAMA0'  # or '/dev/ttyACM0' for USB
-FC_BAUD = 921600
-GCS_IP = '10.0.0.100'  # Ground station IP
-GCS_PORT = 14550
-
-class MAVLinkForwarder:
-    def __init__(self):
-        # Connect to flight controller
-        self.fc = mavutil.mavlink_connection(FC_SERIAL, baud=FC_BAUD)
-        self.fc.wait_heartbeat()
-        print(f"Connected to FC: system {self.fc.target_system}")
-        
-        # UDP socket for GCS
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        
-        # Request telemetry streams
-        self.fc.mav.request_data_stream_send(
-            self.fc.target_system,
-            self.fc.target_component,
-            mavutil.mavlink.MAV_DATA_STREAM_ALL,
-            10,  # 10 Hz
-            1
-        )
-    
-    def forward_to_gcs(self):
-        """Forward FC telemetry to GCS via mesh"""
-        while True:
-            msg = self.fc.recv_msg()
-            if msg:
-                # Send raw bytes to GCS
-                self.sock.sendto(msg.get_msgbuf(), (GCS_IP, GCS_PORT))
-    
-    def forward_to_fc(self):
-        """Forward GCS commands to FC"""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(('0.0.0.0', 14551))
-        
-        while True:
-            data, addr = sock.recvfrom(4096)
-            # Forward to FC
-            self.fc.write(data)
-
-if __name__ == '__main__':
-    forwarder = MAVLinkForwarder()
-    
-    # Start forwarding threads
-    t1 = threading.Thread(target=forwarder.forward_to_gcs)
-    t2 = threading.Thread(target=forwarder.forward_to_fc)
-    
-    t1.start()
-    t2.start()
-    
-    t1.join()
-    t2.join()
+```yaml
+telemetry:
+  gps:
+    enabled: true
+    device: null            # auto-detect (/dev/ttyUSB0, /dev/ttyAMA0, ...)
+  mavlink:
+    enabled: true
+    fc_serial: /dev/ttyACM0
+    fc_baud: 921600
+    gcs_ip: 10.0.0.100      # ground station
+    gcs_port: 14550         # QGC / Mission Planner UDP
+    local_port: 14551       # return path (GCS → FC)
+    stream_rate_hz: 10
 ```
 
-### 7.4 MAVLink Forwarder systemd Service
+The forwarder:
+- Reads MAVLink from the flight controller serial port
+- Forwards telemetry to the GCS over the mesh (UDP)
+- Receives GCS commands and writes them back to the FC
+- Publishes GPS from the FC into the mesh (alfred type 128)
+- Restarts automatically if the FC serial reconnects
 
-Create `/etc/systemd/system/mavlink-forwarder.service`:
+QoS gives `udp/tcp:14550-14555` a strict priority class so control traffic
+wins over video on congested links.
 
-```ini
-[Unit]
-Description=MAVLink Forwarder via Mesh
-After=drone-mesh.service
-Requires=drone-mesh.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /usr/local/bin/mavlink-forwarder.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable:
-```bash
-sudo systemctl enable mavlink-forwarder.service
-sudo systemctl start mavlink-forwarder.service
-```
-
-### 7.5 Ground Station Connection
+### 7.4 Ground Station Connection
 
 **QGroundControl (Linux/Windows):**
 1. Open QGroundControl
@@ -788,19 +637,45 @@ sudo systemctl start mavlink-forwarder.service
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 8.2 Video Streaming Commands
+### 8.2 Sender Configuration
+
+Enable the sender on the drone in `mesh.yaml`:
+
+```yaml
+video:
+  mode: sender
+  source_device: /dev/video0    # auto-detect, or libcamera / nvidia / test / file
+  caps: "video/x-raw,width=1280,height=720,framerate=30/1"
+  bitrate_kbps: 4000
+  transport: unicast            # unicast | multicast
+  fec: true                     # RTP ULP FEC
+  dest_ip: 10.0.0.100
+  dest_port: 5000
+```
+
+`meshd` builds and supervises the `gst-launch-1.0` pipeline, choosing the
+source automatically (v4l2 USB camera, `libcamerasrc` on Pi, NVENC on Jetson,
+a test pattern, or a file replay) and inserting ULP FEC
+(`rtpulpfecenc`/`rtpulpfecdec`) when `fec: true`.
+
+### 8.3 Receiver Configuration
+
+On the ground station:
+
+```yaml
+video:
+  mode: receiver
+  dest_port: 5000
+```
+
+The receiver pipeline performs `rtph264depay → avdec_h264 → autovideosink`
+with FEC de-interleaving.
+
+### 8.4 Manual Equivalents (for reference)
 
 **Raspberry Pi Camera (libcamerasrc):**
 
 ```bash
-# Low quality (640x480, 30fps, ~2 Mbps)
-gst-launch-1.0 -v libcamerasrc \
-    ! video/x-raw,width=640,height=480,framerate=30/1 \
-    ! videoconvert \
-    ! x264enc tune=zerolatency bitrate=2000 speed-preset=superfast \
-    ! rtph264pay config-interval=1 \
-    ! udpsink host=10.0.0.100 port=5000
-
 # Medium quality (1280x720, 30fps, ~4 Mbps)
 gst-launch-1.0 -v libcamerasrc \
     ! video/x-raw,width=1280,height=720,framerate=30/1 \
@@ -808,59 +683,21 @@ gst-launch-1.0 -v libcamerasrc \
     ! x264enc tune=zerolatency bitrate=4000 speed-preset=superfast \
     ! rtph264pay config-interval=1 \
     ! udpsink host=10.0.0.100 port=5000
-
-# High quality (1920x1080, 30fps, ~8 Mbps)
-gst-launch-1.0 -v libcamerasrc \
-    ! video/x-raw,width=1920,height=1080,framerate=30/1 \
-    ! videoconvert \
-    ! x264enc tune=zerolatency bitrate=8000 speed-preset=superfast \
-    ! rtph264pay config-interval=1 \
-    ! udpsink host=10.0.0.100 port=5000
 ```
 
 **Jetson Camera (nvarguscamerasrc):**
 
 ```bash
-# Low quality (640x480, 30fps, ~2 Mbps)
-gst-launch-1.0 -v nvarguscamerasrc \
-    ! video/x-raw,width=640,height=480,framerate=30/1 \
-    ! videoconvert \
-    ! nvv4l2h264enc bitrate=2000 \
-    ! rtph264pay config-interval=1 \
-    ! udpsink host=10.0.0.100 port=5000
-
-# Medium quality (1280x720, 30fps, ~4 Mbps)
 gst-launch-1.0 -v nvarguscamerasrc \
     ! video/x-raw,width=1280,height=720,framerate=30/1 \
     ! videoconvert \
     ! nvv4l2h264enc bitrate=4000 \
     ! rtph264pay config-interval=1 \
     ! udpsink host=10.0.0.100 port=5000
-
-# High quality (1920x1080, 30fps, ~8 Mbps)
-gst-launch-1.0 -v nvarguscamerasrc \
-    ! video/x-raw,width=1920,height=1080,framerate=30/1 \
-    ! videoconvert \
-    ! nvv4l2h264enc bitrate=8000 \
-    ! rtph264pay config-interval=1 \
-    ! udpsink host=10.0.0.100 port=5000
 ```
 
-**USB Camera (v4l2src):**
+**Ground station receiver:**
 
-```bash
-# Low quality (640x480, 30fps, ~2 Mbps)
-gst-launch-1.0 -v v4l2src device=/dev/video0 \
-    ! video/x-raw,width=640,height=480,framerate=30/1 \
-    ! videoconvert \
-    ! x264enc tune=zerolatency bitrate=2000 speed-preset=superfast \
-    ! rtph264pay config-interval=1 \
-    ! udpsink host=10.0.0.100 port=5000
-```
-
-### 8.3 Ground Station Receiver
-
-**GStreamer command line:**
 ```bash
 gst-launch-1.0 udpsrc port=5000 \
     ! application/x-rtp,encoding-name=H264 \
@@ -869,116 +706,15 @@ gst-launch-1.0 udpsrc port=5000 \
     ! autovideosink
 ```
 
-**VLC Media Player:**
-1. Open VLC
-2. Media → Open Network Stream
-3. Enter: `udp://@:5000`
-4. Click Play
+**VLC:** Media → Open Network Stream → `udp://@:5000`
+**QGroundControl:** Application Settings → General → Video Settings → Source:
+UDP h.264 Video Stream, UDP Port 5000.
 
-**QGroundControl:**
-1. Application Settings → General → Video Settings
-2. Source: UDP h.264 Video Stream
-3. UDP Port: 5000
+### 8.5 Adaptive Bitrate
 
-### 8.4 Video Streaming systemd Service
-
-Create `/etc/systemd/system/video-stream.service`:
-
-```ini
-[Unit]
-Description=Drone Video Stream via Mesh
-After=drone-mesh.service
-Requires=drone-mesh.service
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/start-video-stream.sh
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Create `/usr/local/bin/start-video-stream.sh`:
-
-```bash
-#!/bin/bash
-# start-video-stream.sh - Start video streaming
-
-GCS_IP="10.0.0.100"
-PORT=5000
-QUALITY="low"  # low, medium, high
-
-# Detect camera type
-if [ -e /dev/video0 ]; then
-    # USB camera
-    case $QUALITY in
-        low)
-            gst-launch-1.0 -v v4l2src device=/dev/video0 \
-                ! video/x-raw,width=640,height=480,framerate=30/1 \
-                ! videoconvert \
-                ! x264enc tune=zerolatency bitrate=2000 speed-preset=superfast \
-                ! rtph264pay config-interval=1 \
-                ! udpsink host=${GCS_IP} port=${PORT}
-            ;;
-        medium)
-            gst-launch-1.0 -v v4l2src device=/dev/video0 \
-                ! video/x-raw,width=1280,height=720,framerate=30/1 \
-                ! videoconvert \
-                ! x264enc tune=zerolatency bitrate=4000 speed-preset=superfast \
-                ! rtph264pay config-interval=1 \
-                ! udpsink host=${GCS_IP} port=${PORT}
-            ;;
-        high)
-            gst-launch-1.0 -v v4l2src device=/dev/video0 \
-                ! video/x-raw,width=1920,height=1080,framerate=30/1 \
-                ! videoconvert \
-                ! x264enc tune=zerolatency bitrate=8000 speed-preset=superfast \
-                ! rtph264pay config-interval=1 \
-                ! udpsink host=${GCS_IP} port=${PORT}
-            ;;
-    esac
-elif command -v nvarguscamerasrc &> /dev/null; then
-    # Jetson camera
-    case $QUALITY in
-        low)
-            gst-launch-1.0 -v nvarguscamerasrc \
-                ! video/x-raw,width=640,height=480,framerate=30/1 \
-                ! videoconvert \
-                ! nvv4l2h264enc bitrate=2000 \
-                ! rtph264pay config-interval=1 \
-                ! udpsink host=${GCS_IP} port=${PORT}
-            ;;
-        medium)
-            gst-launch-1.0 -v nvarguscamerasrc \
-                ! video/x-raw,width=1280,height=720,framerate=30/1 \
-                ! videoconvert \
-                ! nvv4l2h264enc bitrate=4000 \
-                ! rtph264pay config-interval=1 \
-                ! udpsink host=${GCS_IP} port=${PORT}
-            ;;
-        high)
-            gst-launch-1.0 -v nvarguscamerasrc \
-                ! video/x-raw,width=1920,height=1080,framerate=30/1 \
-                ! videoconvert \
-                ! nvv4l2h264enc bitrate=8000 \
-                ! rtph264pay config-interval=1 \
-                ! udpsink host=${GCS_IP} port=${PORT}
-            ;;
-    esac
-else
-    echo "No camera found"
-    exit 1
-fi
-```
-
-Enable:
-```bash
-sudo chmod +x /usr/local/bin/start-video-stream.sh
-sudo systemctl enable video-stream.service
-sudo systemctl start video-stream.service
-```
+`video.adaptive: true` reserves a video QoS class (20mbit/40mbit) and enables
+RTCP-driven adaptation (future work). For now, adapt `bitrate_kbps` per link
+quality.
 
 ---
 
@@ -986,45 +722,46 @@ sudo systemctl start video-stream.service
 
 ### 9.1 What is Alfred-GPSD
 
-alfred-gpsd distributes GPS location information across the batman-adv mesh. Every node can query the GPS position of every other node.
+alfred-gpsd distributes GPS location information across the batman-adv mesh.
+Every node can query the GPS position of every other node. `meshd` publishes
+positions to **alfred type 128** (GPS) and fleet registry data to **type 129**.
 
-### 9.2 Install and Configure gpsd
+### 9.2 Configure GPS Distribution
 
-```bash
-# Install gpsd
-sudo apt install gpsd gpsd-clients
+Enable in `mesh.yaml`:
 
-# Configure gpsd
-sudo tee /etc/default/gpsd << 'EOF'
-START_DAEMON="true"
-GPSD_OPTIONS="-n"
-DEVICES="/dev/ttyUSB0"  # Change to your GPS device
-USBAUTO="true"
-GPSD_SOCKET="/var/run/gpsd.sock"
-EOF
-
-# Enable and start gpsd
-sudo systemctl enable gpsd
-sudo systemctl start gpsd
+```yaml
+telemetry:
+  gps:
+    enabled: true
+    device: null              # auto-detect /dev/ttyUSB0, /dev/ttyAMA0, ...
+    fixed_location: null      # "lat,lon,alt" for fixed ground stations
 ```
 
-### 9.3 Start Alfred GPS Distribution
-
-**On drones with GPS:**
-```bash
-# Start alfred daemon
-sudo alfred -i bat0 -b bat0 &
-
-# Start alfred-gpsd (reads from gpsd)
-sudo alfred-gpsd -s
-```
+**On drones with GPS:** `meshd` starts `gpsd` on the auto-detected device and
+runs `alfred-gpsd -s` to publish live position.
 
 **On ground station (fixed location):**
-```bash
-# Start alfred daemon
-sudo alfred -i bat0 -b bat0 &
 
-# Start alfred-gpsd with fixed location
+```yaml
+telemetry:
+  gps:
+    enabled: true
+    fixed_location: "48.858222,2.2945,358"
+```
+
+**On drones with a flight controller:** MAVLink GPS (from the FC) is also
+published into the mesh automatically when `telemetry.mavlink.enabled` is on.
+
+### 9.3 Manual Equivalents (for reference)
+
+```bash
+# gpsd
+sudo apt install gpsd gpsd-clients
+# Start alfred daemon + alfred-gpsd
+sudo alfred -i bat0 -b bat0 &
+sudo alfred-gpsd -s
+# Fixed location (ground station)
 sudo alfred-gpsd -s -l 48.858222,2.2945,358
 ```
 
@@ -1047,62 +784,11 @@ alfred-gpsd
 ]
 ```
 
-### 9.5 GPS Distribution systemd Service
-
-Create `/etc/systemd/system/alfred-gpsd.service`:
-
-```ini
-[Unit]
-Description=Alfred GPS Distribution via Mesh
-After=drone-mesh.service
-Requires=drone-mesh.service
-
-[Service]
-Type=simple
-ExecStartPre=/usr/local/bin/start-alfred.sh
-ExecStart=/usr/local/bin/start-alfred-gpsd.sh
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Create `/usr/local/bin/start-alfred.sh`:
-
-```bash
-#!/bin/bash
-# Start alfred daemon
-alfred -i bat0 -b bat0
-```
-
-Create `/usr/local/bin/start-alfred-gpsd.sh`:
-
-```bash
-#!/bin/bash
-# Start alfred-gpsd
-
-# Check if GPS device exists
-if [ -e /dev/ttyUSB0 ] || [ -e /dev/ttyAMA0 ]; then
-    # Use GPS
-    alfred-gpsd -s
-else
-    # Use fixed location (ground station)
-    alfred-gpsd -s -l 48.858222,2.2945,358
-fi
-```
-
-Enable:
-```bash
-sudo chmod +x /usr/local/bin/start-alfred.sh
-sudo chmod +x /usr/local/bin/start-alfred-gpsd.sh
-sudo systemctl enable alfred-gpsd.service
-sudo systemctl start alfred-gpsd.service
-```
+The dashboard exposes the same data as `GET /api/mesh/gps`.
 
 ---
 
-## 10. Network Visualization from Ground Station
+## 10. Network Visualization & Dashboard
 
 ### 10.1 batctl Commands
 
@@ -1128,6 +814,8 @@ sudo batctl tgj   # Translation table JSON
 
 ### 10.2 Alfred + Batadv-vis
 
+`meshd` supervises `alfred` and `batadv-vis` automatically. For manual use:
+
 ```bash
 # Start alfred (distributes data across mesh)
 sudo alfred -i bat0 -b bat0 &
@@ -1142,330 +830,58 @@ batadv-vis -f json
 batadv-vis -f dot
 ```
 
-### 10.3 Custom Python API
+### 10.3 Web Dashboard
 
-Create `/usr/local/bin/mesh-api.py`:
+The dashboard is a Flask app **served in-process by `meshd`** — no separate
+`mesh-api.py`, Flask service, or static files to install.
 
-```python
-#!/usr/bin/env python3
-"""Mesh network visualization API"""
+Enable it on the ground station:
 
-from flask import Flask, jsonify
-import subprocess
-import json
-
-app = Flask(__name__)
-
-@app.route('/api/mesh/topology')
-def get_topology():
-    """Get mesh topology in JSON format"""
-    result = subprocess.run(['batadv-vis', '-f', 'json'],
-                          capture_output=True, text=True)
-    try:
-        return jsonify(json.loads(result.stdout))
-    except:
-        return jsonify({"error": "Failed to get topology"}), 500
-
-@app.route('/api/mesh/originators')
-def get_originators():
-    """Get all mesh nodes"""
-    result = subprocess.run(['batctl', 'oj'],
-                          capture_output=True, text=True)
-    try:
-        return jsonify(json.loads(result.stdout))
-    except:
-        return jsonify({"error": "Failed to get originators"}), 500
-
-@app.route('/api/mesh/neighbors')
-def get_neighbors():
-    """Get direct neighbors"""
-    result = subprocess.run(['batctl', 'nj'],
-                          capture_output=True, text=True)
-    try:
-        return jsonify(json.loads(result.stdout))
-    except:
-        return jsonify({"error": "Failed to get neighbors"}), 500
-
-@app.route('/api/mesh/gateways')
-def get_gateways():
-    """Get available gateways"""
-    result = subprocess.run(['batctl', 'gwj'],
-                          capture_output=True, text=True)
-    try:
-        return jsonify(json.loads(result.stdout))
-    except:
-        return jsonify({"error": "Failed to get gateways"}), 500
-
-@app.route('/api/mesh/clients')
-def get_clients():
-    """Get all clients connected to mesh"""
-    result = subprocess.run(['batctl', 'tgj'],
-                          capture_output=True, text=True)
-    try:
-        return jsonify(json.loads(result.stdout))
-    except:
-        return jsonify({"error": "Failed to get clients"}), 500
-
-@app.route('/api/mesh/gps')
-def get_gps():
-    """Get GPS positions of all nodes"""
-    result = subprocess.run(['alfred-gpsd'],
-                          capture_output=True, text=True)
-    try:
-        return jsonify(json.loads(result.stdout))
-    except:
-        return jsonify({"error": "Failed to get GPS"}), 500
-
-@app.route('/api/mesh/status')
-def get_status():
-    """Get overall mesh status"""
-    # Get originators
-    orig_result = subprocess.run(['batctl', 'oj'],
-                                capture_output=True, text=True)
-    try:
-        originators = json.loads(orig_result.stdout)
-        node_count = len(originators.get('originators', []))
-    except:
-        node_count = 0
-    
-    # Get gateways
-    gw_result = subprocess.run(['batctl', 'gwj'],
-                              capture_output=True, text=True)
-    try:
-        gateways = json.loads(gw_result.stdout)
-        gateway_count = len(gateways.get('gateways', []))
-    except:
-        gateway_count = 0
-    
-    return jsonify({
-        "node_count": node_count,
-        "gateway_count": gateway_count,
-        "status": "healthy" if node_count > 0 else "no_nodes"
-    })
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+```yaml
+node:
+  id: ground-station
+  role: ground-station
+  ip: 10.0.0.100
+dashboard:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
 ```
 
-### 10.4 Web Dashboard
+Access at **http://10.0.0.100:8080**.
 
-Create `/var/www/html/index.html`:
+**Features:**
+- Force-directed D3.js topology graph
+- Link quality indicators (strong/medium/weak)
+- Node list with TQ metrics
+- Neighbor list
+- GPS positions from alfred type 128 (Leaflet map)
+- Fleet nodes from alfred type 129
 
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Drone Mesh Network Monitor</title>
-    <script src="https://d3js.org/d3.v7.min.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
-        .container { display: flex; gap: 20px; }
-        #network-graph { width: 600%; height: 500px; border: 1px solid #ccc; flex: 1; }
-        #map { width: 600px; height: 500px; border: 1px solid #ccc; }
-        #stats { margin-top: 20px; padding: 10px; background: #f5f5f5; }
-        .node { fill: #4CAF50; stroke: #333; stroke-width: 2px; }
-        .node.ground-station { fill: #2196F3; }
-        .link { stroke: #999; stroke-width: 2px; }
-        .link.strong { stroke: #4CAF50; stroke-width: 3px; }
-        .link.weak { stroke: #f44336; stroke-width: 1px; }
-    </style>
-</head>
-<body>
-    <h1>Drone Mesh Network Monitor</h1>
-    <div class="container">
-        <div id="network-graph"></div>
-        <div id="map"></div>
-    </div>
-    <div id="stats"></div>
+**JSON API served by meshd:**
 
-    <script>
-        const width = 600;
-        const height = 500;
+| Endpoint | Description |
+|----------|-------------|
+| `/api/mesh/status` | Aggregated health: node/gateway counts |
+| `/api/mesh/topology` | batadv-vis JSON topology |
+| `/api/mesh/originators` | `batctl oj` |
+| `/api/mesh/neighbors` | `batctl nj` |
+| `/api/mesh/interfaces` | `batctl if` |
+| `/api/mesh/gateways` | `batctl gwj` |
+| `/api/mesh/gps` | GPS positions (alfred type 128) |
+| `/api/mesh/nodes` | Fleet registry (alfred type 129) |
+| `/api/health` | meshd process health |
 
-        // Initialize map
-        const map = L.map('map').setView([0, 0], 2);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '© OpenStreetMap contributors'
-        }).addTo(map);
+### 10.4 Management Plane
 
-        // Initialize SVG
-        const svg = d3.select("#network-graph")
-            .append("svg")
-            .attr("width", width)
-            .attr("height", height);
+The dashboard is read-only. For control, use the JSON-RPC management plane
+served by `meshd` (UDP, token-authenticated):
 
-        // Fetch and render network topology
-        async function updateTopology() {
-            try {
-                const response = await fetch('/api/mesh/topology');
-                const data = await response.json();
-
-                // Process nodes and links
-                const nodes = [];
-                const links = [];
-                const nodeMap = {};
-
-                data.forEach(primary => {
-                    if (!nodeMap[primary.primary]) {
-                        nodeMap[primary.primary] = {
-                            id: primary.primary,
-                            type: primary.type || "drone"
-                        };
-                        nodes.push(nodeMap[primary.primary]);
-                    }
-
-                    primary.neighbors.forEach(neighbor => {
-                        links.push({
-                            source: primary.primary,
-                            target: neighbor.neighbor,
-                            metric: parseFloat(neighbor.metric)
-                        });
-                    });
-                });
-
-                // Clear and redraw
-                svg.selectAll("*").remove();
-
-                // Create force simulation
-                const simulation = d3.forceSimulation(nodes)
-                    .force("link", d3.forceLink(links).id(d => d.id).distance(100))
-                    .force("charge", d3.forceManyBody().strength(-200))
-                    .force("center", d3.forceCenter(width / 2, height / 2));
-
-                // Draw links
-                const link = svg.selectAll(".link")
-                    .data(links)
-                    .enter()
-                    .append("line")
-                    .attr("class", d => `link ${d.metric > 0.9 ? 'strong' : 'weak'}`);
-
-                // Draw nodes
-                const node = svg.selectAll(".node")
-                    .data(nodes)
-                    .enter()
-                    .append("circle")
-                    .attr("class", d => `node ${d.type}`)
-                    .attr("r", 10)
-                    .call(d3.drag()
-                        .on("start", dragstarted)
-                        .on("drag", dragged)
-                        .on("end", dragended));
-
-                // Update positions
-                simulation.on("tick", () => {
-                    link
-                        .attr("x1", d => d.source.x)
-                        .attr("y1", d => d.source.y)
-                        .attr("x2", d => d.target.x)
-                        .attr("y2", d => d.target.y);
-
-                    node
-                        .attr("cx", d => d.x)
-                        .attr("cy", d => d.y);
-                });
-
-                // Drag functions
-                function dragstarted(event) {
-                    if (!event.active) simulation.alphaTarget(0.3).restart();
-                    event.subject.fx = event.subject.x;
-                    event.subject.fy = event.subject.y;
-                }
-
-                function dragged(event) {
-                    event.subject.fx = event.x;
-                    event.subject.fy = event.y;
-                }
-
-                function dragended(event) {
-                    if (!event.active) simulation.alphaTarget(0);
-                    event.subject.fx = null;
-                    event.subject.fy = null;
-                }
-
-                // Update stats
-                document.getElementById('stats').innerHTML = `
-                    <strong>Network Statistics:</strong><br>
-                    Nodes: ${nodes.length} | Links: ${links.length}
-                `;
-            } catch (error) {
-                console.error('Error fetching topology:', error);
-            }
-        }
-
-        // Fetch and render GPS positions
-        async function updateGPS() {
-            try {
-                const response = await fetch('/api/mesh/gps');
-                const data = await response.json();
-
-                // Clear existing markers
-                map.eachLayer(layer => {
-                    if (layer instanceof L.Marker) {
-                        map.removeLayer(layer);
-                    }
-                });
-
-                // Add markers
-                data.forEach(loc => {
-                    const tpv = loc.tpv || {};
-                    if (tpv.lat && tpv.lon) {
-                        L.marker([tpv.lat, tpv.lon])
-                            .addTo(map)
-                            .bindPopup(`Node: ${loc.source}<br>Alt: ${tpv.alt || 'N/A'}m`);
-                    }
-                });
-
-                // Fit bounds if we have locations
-                if (data.length > 0) {
-                    const bounds = data
-                        .filter(loc => loc.tpv && loc.tpv.lat && loc.tpv.lon)
-                        .map(loc => [loc.tpv.lat, loc.tpv.lon]);
-                    
-                    if (bounds.length > 0) {
-                        map.fitBounds(bounds, { padding: [20, 20] });
-                    }
-                }
-            } catch (error) {
-                console.error('Error fetching GPS:', error);
-            }
-        }
-
-        // Update every 2 seconds
-        updateTopology();
-        updateGPS();
-        setInterval(updateTopology, 2000);
-        setInterval(updateGPS, 5000);
-    </script>
-</body>
-</html>
-```
-
-### 10.5 Visualization systemd Service
-
-Create `/etc/systemd/system/mesh-visualization.service`:
-
-```ini
-[Unit]
-Description=Mesh Network Visualization API
-After=drone-mesh.service
-Requires=drone-mesh.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /usr/local/bin/mesh-api.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable:
 ```bash
-sudo systemctl enable mesh-visualization.service
-sudo systemctl start mesh-visualization.service
+meshctl nodes                    # fleet from alfred type 129
+meshctl -d 10.0.0.3 status       # remote status
+meshctl -d 10.0.0.3 ping
+meshctl -d 10.0.0.3 restart
 ```
 
 ---
@@ -1474,57 +890,79 @@ sudo systemctl start mesh-visualization.service
 
 ### 11.1 Configuration Profiles
 
-| Scenario | orig_interval | hop_penalty | fragmentation | Notes |
-|----------|--------------|-------------|---------------|-------|
-| **Low-latency (control)** | 500ms | 10 | 1 | Fast topology updates, more overhead |
-| **Balanced (default)** | 1000ms | 15 | 1 | Good for most drone operations |
-| **High-throughput (video)** | 1000ms | 15 | 1 | Optimize for bandwidth |
-| **Long-range (stability)** | 2000ms | 30 | 0 | Less overhead, slower updates |
-| **Highly mobile** | 500ms | 10 | 1 | For fast-moving drones |
+All of these are set declaratively in `mesh.yaml`:
 
-### 11.2 Apply Configuration
+| Scenario | orig_interval_ms | hop_penalty | fragmentation | Notes |
+|----------|------------------|-------------|---------------|-------|
+| **Low-latency (control)** | 500 | 10 | true | Fast topology updates, more overhead |
+| **Balanced (default)** | 1000 | 15 | true | Good for most drone operations |
+| **High-throughput (video)** | 1000 | 15 | true | Optimize for bandwidth |
+| **Long-range (stability)** | 2000 | 30 | false | Less overhead, slower updates |
+| **Highly mobile** | 500 | 10 | true | For fast-moving drones |
 
-```bash
-# Low-latency profile
-sudo batctl orig_interval 500
-sudo batctl hop_penalty 10
-sudo batctl fragmentation 1
+```yaml
+mesh:
+  routing_algo: BATMAN_V
+  orig_interval_ms: 500
+  hop_penalty: 10
+  fragmentation: true
+```
 
-# Balanced profile (default)
-sudo batctl orig_interval 1000
-sudo batctl hop_penalty 15
-sudo batctl fragmentation 1
+### 11.2 QoS Traffic Shaping
 
-# Long-range profile
-sudo batctl orig_interval 2000
-sudo batctl hop_penalty 30
-sudo batctl fragmentation 0
+`meshd` applies strict-priority `tc` classes on `bat0` so control traffic is
+never starved by video:
+
+```yaml
+qos:
+  enabled: true
+  classes:
+    - name: command_and_control
+      dscp: [CS6, EF]
+      matches:
+        - protocol: udp
+          dport: 14550:14555
+      rate: 2mbit
+      ceil: 8mbit
+      prio: 0
+    - name: video
+      dscp: [AF41, AF42, AF43]
+      matches:
+        - protocol: udp
+          dport: 5000:5999
+      rate: 20mbit
+      ceil: 40mbit
+      prio: 1
+    - name: best_effort
+      is_default: true
+      prio: 2
 ```
 
 ### 11.3 Multiple Interfaces
 
-For higher throughput, use multiple WiFi adapters:
+Add one entry per radio:
 
-```bash
-# Add multiple interfaces to batman-adv
-sudo batctl if add mesh0
-sudo batctl if add mesh1
-
-# Verify
-sudo batctl if
-# Should show: mesh0, mesh1
+```yaml
+radios:
+  - name: radioA
+    iface: auto
+    mode: auto
+    band: 2.4g
+    channel: 6
+  - name: radioB
+    iface: auto
+    mode: auto
+    band: 5g
+    channel: 36
 ```
+
+Requires `mesh.interface_routing: true`.
 
 ### 11.4 Network Coding
 
-Enable network coding to combine packets (requires 3+ nodes):
-
-```bash
-# Enable network coding
-sudo batctl nc 1
-
-# Verify
-sudo batctl nc
+```yaml
+mesh:
+  network_coding: true
 ```
 
 ---
@@ -1535,17 +973,23 @@ sudo batctl nc
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| No neighbors visible | Mesh interface not up | Check `batctl if`, ensure mesh0 is added |
-| High latency | Slow OGM interval | Decrease `orig_interval` |
+| No neighbors visible | Mesh interface not up | `meshctl status`, check radios |
+| High latency | Slow OGM interval | Decrease `orig_interval_ms` |
 | Flapping routes | Unstable links | Increase `hop_penalty`, check signal |
-| Gateway not selected | No gateway configured | Set `gw_mode server` on gateway node |
+| Gateway not selected | No gateway configured | `mesh.gateway: server` on gateway node |
 | Packet loss | Interference | Change channel, check signal strength |
-| Video stuttering | Bandwidth limited | Reduce resolution, check mesh throughput |
+| Video stuttering | Bandwidth limited | Reduce resolution / bitrate, check QoS |
 | MAVLink timeout | FC not connected | Check UART/USB connection, baud rate |
+| Remote status fails | Token mismatch | Ensure `management.token` matches (or `MESH_MGMT_TOKEN`) |
 
 ### 12.2 Debugging Commands
 
 ```bash
+# meshd control plane
+meshctl status                 # full local status (radios, lifecycle, health)
+meshctl nodes                  # fleet
+journalctl -u meshd -f         # daemon logs
+
 # Check batman-adv status
 sudo batctl o    # Originators
 sudo batctl n    # Neighbors
@@ -1572,37 +1016,31 @@ sudo batctl tp <MAC_ADDRESS>
 ### 12.3 Log Analysis
 
 ```bash
-# Check batman-adv kernel messages
-dmesg | grep batman-adv
+# meshd daemon (all supervised services report here)
+journalctl -u meshd -f
 
-# Check system logs
-journalctl -u drone-mesh -f
+# GPS / telemetry
+journalctl -u meshd -f | grep -i gps
 
-# Check alfred logs
-journalctl -u alfred-gpsd -f
+# MAVLink forwarder
+journalctl -u meshd -f | grep -i mavlink
 
-# Check MAVLink forwarder logs
-journalctl -u mavlink-forwarder -f
+# Video pipeline
+journalctl -u meshd -f | grep -i gst
 ```
 
 ### 12.4 Reset Mesh
 
 ```bash
-# Stop all services
-sudo systemctl stop drone-mesh
-sudo systemctl stop alfred-gpsd
-sudo systemctl stop mavlink-forwarder
+# Restart the whole data plane
+sudo systemctl restart meshd
 
-# Tear down mesh
-sudo /usr/local/bin/teardown-drone-mesh.sh
+# Stop the mesh entirely (radios return to managed mode)
+sudo systemctl stop meshd
 
-# Reconfigure
-sudo /usr/local/bin/setup-drone-mesh.sh
-
-# Restart services
-sudo systemctl start drone-mesh
-sudo systemctl start alfred-gpsd
-sudo systemctl start mavlink-forwarder
+# Inspect why a step failed
+journalctl -u meshd -f
+meshctl status
 ```
 
 ---
@@ -1611,7 +1049,8 @@ sudo systemctl start mavlink-forwarder
 
 ### 13.1 When to Use Ad-Hoc Mode
 
-Ad-hoc (IBSS) mode is an alternative to 802.11s mesh point mode for creating the wireless link between drones. Use ad-hoc mode when:
+Ad-hoc (IBSS) mode is an alternative to 802.11s mesh point mode for creating
+the wireless link between drones. Use ad-hoc mode when:
 
 - Your WiFi adapter does **not** support 802.11s mesh point mode
 - You need quick setup for testing/development
@@ -1622,116 +1061,79 @@ Ad-hoc (IBSS) mode is an alternative to 802.11s mesh point mode for creating the
 iw phy | grep -A8 "interface modes"
 ```
 
-If you see `mesh point` in the output, use the standard 802.11s setup (Section 5). If you only see `IBSS`, use this ad-hoc section.
+If you see `mesh point`, keep `radios[].mode: auto` (uses 802.11s). If you
+only see `IBSS`, set `mode: ibss`.
 
 ### 13.2 Mesh Point vs Ad-Hoc Comparison
 
 | Feature | Mesh Point (802.11s) | Ad-Hoc (IBSS) |
 |---------|---------------------|---------------|
 | **Batman-adv support** | Yes | Yes |
-| **Auto-detection** | Yes (check `iw phy`) | Yes (fallback) |
+| **Auto-detection** | Yes (check `iw phy`) | Yes (`mode: auto` fallback) |
 | **Performance** | Better throughput | Slightly lower |
 | **Reliability** | More robust | Adequate for testing |
 | **SAE authentication** | Supported | Not available |
 | **Multi-hop native** | Yes (built into 802.11s) | No (batman-adv handles) |
-| **Setup complexity** | Higher (wpa_supplicant) | Lower (iwconfig) |
+| **Setup complexity** | Higher (wpa_supplicant) | Lower (`mode: ibss`) |
 
-### 13.3 Auto-Detection with setup_adhoc.sh
+### 13.3 Using IBSS with meshd
 
-The `setup_adhoc.sh` script automatically detects whether your adapter supports mesh point mode and falls back to ad-hoc if needed:
+Set `mode: ibss` (or leave `auto` — meshd falls back to IBSS when mesh point
+is unavailable):
 
-```bash
-# The script checks:
-iw phy | grep "mesh point"
-
-# If found → uses 802.11s mesh point mode
-# If NOT found → uses ad-hoc (IBSS) mode
+```yaml
+node:
+  id: drone-01
+  ip: 10.0.0.3
+mesh:
+  id: drone-mesh
+  essid: drone-mesh
+  ibss_bssid: "02:12:34:56:78:9a"   # must match on all nodes
+radios:
+  - name: radioA
+    iface: auto
+    mode: ibss
+    band: 2.4g
+    channel: 6
 ```
 
-**Usage:**
-```bash
-sudo ./setup_adhoc.sh
-```
+`meshd` brings up IBSS with the fixed BSSID, attaches it to `bat0`, and
+assigns the IP. The fixed BSSID is what makes independent nodes join the same
+cell — without it each node could create its own random-BSSID IBSS network.
 
-The script will:
-1. Detect your WiFi interface automatically
-2. Check for mesh point support
-3. Configure the appropriate mode
-4. Create bat0 and assign IP address
-
-### 13.4 Step-by-Step Ad-Hoc Configuration
-
-If you prefer manual configuration instead of using the script:
-
-#### Check for IBSS Support
-
-```bash
-iw phy | grep -A8 "interface modes"
-```
-
-Look for `IBSS` in the output.
+### 13.4 Manual Ad-Hoc Configuration (for reference)
 
 #### Set Up Ad-Hoc Interface
 
 ```bash
-# Take interface down
 sudo ip link set wlan0 down
-
-# Set to ad-hoc mode
 sudo iwconfig wlan0 mode ad-hoc
-
-# Set network name (must be SAME on all drones)
 sudo iwconfig wlan0 essid "drone-mesh"
-
-# Set channel (must be SAME on all drones)
 sudo iwconfig wlan0 channel 6
-
-# Bring interface up
 sudo ip link set wlan0 up
 ```
-
-#### Verify Ad-Hoc Mode
-
-```bash
-iwconfig wlan0
-```
-
-Should show `Mode:Ad-Hoc` and the ESSID.
 
 #### Configure Batman-Adv
 
 ```bash
-# Load batman-adv module
 sudo modprobe batman_adv
-
-# Create bat0 interface
 sudo batctl if add wlan0
-
-# Bring up bat0
 sudo ip link set bat0 up
-
-# Set routing algorithm
 sudo batctl routing_algo BATMAN_V
-
-# Assign IP address (unique per drone)
 sudo ip addr add 10.0.0.2/24 dev bat0
 ```
 
 #### Test Connectivity
 
-After setting up another drone with a different IP (e.g., 10.0.0.1):
-
 ```bash
-# Check batman-adv neighbors
 sudo batctl o
-
-# Test connectivity
 ping 10.0.0.1
 ```
 
 ### 13.5 Building Batman-Adv from Source (Jetson Tegra)
 
-The Jetson's Tegra kernel does not include batman-adv by default. You must build it from source.
+The Jetson's Tegra kernel does not include batman-adv by default. You must
+build it from source. See [Jetson Build](docs/Jetson-Build.md).
 
 #### Prerequisites
 
@@ -1742,7 +1144,6 @@ sudo apt-get install -y build-essential git
 #### Clone and Build
 
 ```bash
-# Clone batman-adv source
 cd /tmp
 git clone https://git.open-mesh.org/batman-adv.git
 cd batman-adv
@@ -1771,16 +1172,9 @@ Then rebuild.
 #### Install and Load
 
 ```bash
-# Install module
 sudo make -C /lib/modules/$(uname -r)/build M=/tmp/batman-adv PWD=/tmp/batman-adv modules_install
-
-# Update module dependencies
 sudo depmod -a
-
-# Load module
 sudo modprobe batman_adv
-
-# Verify
 lsmod | grep batman
 ```
 
@@ -1800,6 +1194,7 @@ echo 'batman_adv' | sudo tee /etc/modules-load.d/batman-adv.conf
 | `batman_adv: Unknown symbol` | Module not built for your kernel, rebuild from source |
 | ESSID mismatch | All drones must use the EXACT same ESSID |
 | Channel mismatch | All drones must be on the SAME channel |
+| BSSID mismatch | All drones must use the same `mesh.ibss_bssid` |
 
 ---
 
@@ -1807,15 +1202,16 @@ echo 'batman_adv' | sudo tee /etc/modules-load.d/batman-adv.conf
 
 ### 14.1 Using the Uninstall Script
 
-The `uninstall.sh` script completely removes the mesh configuration and restores the system to its original state:
+The `uninstall.sh` script completely removes the mesh configuration and
+restores the system to its original state:
 
 ```bash
 sudo ./uninstall.sh
 ```
 
 **What it removes:**
-- systemd service (`batman-mesh.service`)
-- `/opt/mesh/` installation directory and all scripts
+- systemd service (`meshd.service`)
+- `/opt/mesh/` installation directory, virtualenv, and config
 - Kernel module loading configuration (`/etc/modules-load.d/batman-adv.conf`)
 - IP forwarding settings from `/etc/sysctl.conf`
 - Firewall rules (iptables, UFW, firewalld)
@@ -1827,12 +1223,13 @@ sudo ./uninstall.sh
 
 ### 14.2 Manual Cleanup
 
-If you need to remove specific components manually without using the full uninstall script:
+If you need to remove specific components manually without using the full
+uninstall script:
 
 ```bash
 # Stop and disable the mesh service
-sudo systemctl stop batman-mesh
-sudo systemctl disable batman-mesh
+sudo systemctl stop meshd
+sudo systemctl disable meshd
 
 # Remove bat0 interface
 sudo batctl if del bat0
@@ -1860,6 +1257,16 @@ sudo reboot
 ---
 
 ## 15. References
+
+### Project Documentation
+- [Wiki Home](docs/Home.md) — documentation index
+- [Getting Started](docs/Getting-Started.md) — first-time setup
+- [Configuration](docs/Configuration.md) — `mesh.yaml` reference
+- [Monitoring](docs/Monitoring.md) — `meshctl`, dashboard, batctl commands
+- [Video Streaming](docs/Video-Streaming.md) — pipeline configuration
+- [Ground Station](docs/Ground-Station.md) — GCS + dashboard setup
+- [Architecture](docs/Architecture.md) — meshd control plane + data plane
+- [Troubleshooting](docs/Troubleshooting.md) — common issues
 
 ### Official Documentation
 - [Batman-Adv Kernel Documentation](https://docs.kernel.org/networking/batman-adv.html)
@@ -1890,47 +1297,49 @@ sudo reboot
 
 ```bash
 # Installation
-sudo apt install batctl kmod-batman-adv wpad-mesh-wolfssl alfred gpsd gpsd-clients
+sudo ./install_packages.sh          # OS packages + kernel modules
+sudo ./install.sh --with-all        # meshd into /opt/mesh/.venv + systemd
 
-# Configuration
-sudo batctl if add mesh0
-sudo batctl routing_algo BATMAN_V
-sudo batctl orig_interval 1000
-sudo batctl fragmentation 1
+# Configuration (mesh.yaml — same on all nodes except node.id/ip)
+sudo nano /opt/mesh/config/mesh.yaml
+meshctl -c /opt/mesh/config/mesh.yaml validate   # dry-run validate
 
-# Monitoring
+# Service
+sudo systemctl start meshd
+sudo systemctl status meshd
+
+# Local control
+meshctl status
+meshctl ping
+meshctl restart
+
+# Fleet / remote management
+meshctl nodes                        # alfred type 129 registry
+meshctl -d 10.0.0.3 status           # remote node over mesh JSON-RPC
+meshctl token                        # generate a management token
+
+# Monitoring (data plane)
 sudo batctl o          # Originators
 sudo batctl n          # Neighbors
 sudo batctl gwl        # Gateways
 sudo batctl tg         # Translation table
 
 # Visualization
-sudo alfred -i bat0 -b bat0
-sudo batadv-vis -i bat0 -s
-batadv-vis -f json     # JSON output
-batadv-vis -f dot      # Graphviz output
+batadv-vis -f json     # Topology JSON
+# Dashboard: enable dashboard.enabled in mesh.yaml, open http://<node>:8080
 
 # GPS
 alfred-gpsd            # Get all GPS positions
-alfred-gpsd -s         # Start GPS server
 
 # Uninstall
 sudo ./uninstall.sh    # Complete removal
 # Or manual cleanup:
+sudo systemctl stop meshd && sudo systemctl disable meshd
 sudo batctl if del bat0
 sudo rmmod batman_adv
-sudo systemctl disable batman-mesh
 
 # Ad-Hoc / IBSS Mode (when mesh point not supported)
-iw phy | grep -A8 "interface modes"  # Check for IBSS support
-sudo ip link set wlan0 down
-sudo iwconfig wlan0 mode ad-hoc
-sudo iwconfig wlan0 essid "drone-mesh"
-sudo iwconfig wlan0 channel 6
-sudo ip link set wlan0 up
-sudo batctl if add wlan0
-sudo ip link set bat0 up
-sudo ip addr add 10.0.0.X/24 dev bat0
+# radios[].mode: ibss  +  mesh.ibss_bssid (same on all nodes)
 
 # Build batman-adv from source (Jetson Tegra)
 cd /tmp && git clone https://git.open-mesh.org/batman-adv.git
@@ -1944,14 +1353,17 @@ sudo depmod -a && sudo modprobe batman_adv
 
 | Parameter | Default | Recommended for Drones |
 |-----------|---------|----------------------|
-| `orig_interval` | 1000ms | 500-1000ms |
-| `hop_penalty` | 15 | 10-30 |
-| `fragmentation` | 0 | 1 |
-| `routing_algo` | BATMAN_IV | BATMAN_V |
+| `mesh.routing_algo` | BATMAN_V | BATMAN_V |
+| `mesh.orig_interval_ms` | 1000 | 500-1000 |
+| `mesh.hop_penalty` | 15 | 10-30 |
+| `mesh.fragmentation` | true | true |
+| `radios[].mode` | auto | auto (802.11s, fallback IBSS) |
+| `radios[].band` / channel | 2.4g / 6 | per deployment |
+| `management.token` | change-me | generated (`meshctl token`) |
 
 ---
 
-*Document Version: 1.0*
+*Document Version: 2.0 (meshd rewrite)*
 *Last Updated: August 2026*
 *Mesh Frequency: 2.4 GHz*
 *Hardware: Raspberry Pi 4/5, Jetson Nano/Orin*

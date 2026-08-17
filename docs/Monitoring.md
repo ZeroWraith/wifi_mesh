@@ -1,62 +1,75 @@
 # Monitoring
 
-Checking mesh network health and status.
+Checking mesh network health and status with `meshd`, `meshctl`, and `batctl`.
 
 > [Home](Home.md) > Monitoring
 
-## mesh_status.sh
+## meshctl status
 
-The primary monitoring tool. Run from any mesh node:
-
-```bash
-sudo ./mesh_status.sh
-```
-
-### Output Sections
-
-**[Module]**
-Shows whether the batman_adv kernel module is loaded.
-
-**[Interfaces]**
-Status of the physical WiFi interface and virtual bat0 interface, including IP address.
-
-**[Mesh Neighbors]**
-Direct neighbors discovered by batman-adv (from `batctl n`). Shows MAC address, link quality (TQ), and which interface the neighbor is on.
-
-**[Routing Table]**
-All originators in the mesh (from `batctl o`). Shows which nodes are reachable, the best next-hop, TQ value, and outgoing interface.
-
-**[Gateway Status]**
-Available gateways and their bandwidth (from `batctl gw`).
-
-**[Translation Tables]**
-Local and global MAC address tables (from `batctl tl` and `batctl tg`). Shows which client MACs are connected to which nodes.
-
-**[Statistics]**
-RX/TX byte counts on bat0 and a connectivity test (ping common IPs).
-
-### JSON Output
-
-For programmatic access:
+The primary operator view. Run on any node:
 
 ```bash
-sudo ./mesh_status.sh --json
+meshctl status
 ```
 
-Returns a JSON object with:
+Sample output:
 
-```json
-{
-  "drone_ip": "10.0.0.3",
-  "mesh_id": "drone-mesh",
-  "neighbors": ["aa:bb:cc:dd:ee:01  ..."],
-  "timestamp": "2026-08-12T10:30:00+00:00"
-}
+```
+Node            : drone-01 (drone)
+IP (bat0)       : 10.0.0.3
+State           : up
+Radios          :
+  - radioA: wlan0 [mesh] joined
+Health          : bat0_up=True originators=3
+```
+
+Fields included in the JSON returned by the control socket:
+
+| Field | Description |
+|-------|-------------|
+| `node` | node id, role, IP, netmask, mesh id |
+| `lifecycle` | current state (`down`, `configuring`, `up`, `degraded`, …) |
+| `radios` | per-radio mode, interface, joined/error, txpower quirk |
+| `config_hash` | SHA of the active config |
+| `health` | last health tick (`bat0_up`, originator count) |
+| `running` | daemon liveness |
+| `services` | per-service status (alfred, telemetry, video, dashboard) |
+
+## meshctl fleet + remote
+
+```bash
+meshctl nodes                # all nodes in the alfred registry
+meshctl -d 10.0.0.100 status # remote node status over mesh JSON-RPC
+meshctl ping                 # local daemon liveness
+```
+
+Remote management requires `management.token` to be set and identical on all
+nodes (generate with `meshctl token`).
+
+## Dashboard
+
+The dashboard (`dashboard.enabled: true`) exposes JSON endpoints you can query
+directly from any browser or script:
+
+| Endpoint | Description |
+|----------|-------------|
+| `/api/mesh/status` | Aggregated node/neighbor/gateway counts |
+| `/api/mesh/topology` | batadv-vis JSON topology |
+| `/api/mesh/originators` | batctl originators (JSON) |
+| `/api/mesh/neighbors` | batctl neighbors (JSON) |
+| `/api/mesh/interfaces` | bat0 member interfaces |
+| `/api/mesh/gateways` | batctl gateways (JSON) |
+| `/api/mesh/gps` | Positions published via alfred (type 128) |
+| `/api/mesh/nodes` | Fleet registry (alfred type 129) |
+| `/api/health` | daemon health + lifecycle state |
+
+```bash
+curl -s http://localhost:8080/api/mesh/status | python3 -m json.tool
 ```
 
 ## batctl Commands
 
-The `batctl` tool provides direct access to batman-adv internals.
+`batctl` provides direct access to batman-adv internals.
 
 ### Core Commands
 
@@ -103,69 +116,57 @@ TQ (Transmission Quality) ranges from 0-255:
 
 ## System Logs
 
+### Daemon logs
+
+```bash
+sudo journalctl -u meshd -f              # Live follow
+sudo journalctl -u meshd --since today   # Today's logs
+sudo journalctl -u meshd | grep -i error # Errors only
+```
+
 ### Batman-Adv Kernel Messages
 
 ```bash
 dmesg | grep batman-adv
 ```
 
-### Mesh Service Logs
+### Service logs
+
+Each supervised service (alfred, video, telemetry) logs under its own name;
+watch them with:
 
 ```bash
-journalctl -u batman-mesh -f          # Live follow
-journalctl -u batman-mesh --since today  # Today's logs
+sudo journalctl -u meshd -f | grep -E "alfred|video|telemetry|gpsd"
 ```
 
-### Dashboard Logs
+## Health Tick
+
+While running, `meshd` logs a health summary every 10 seconds:
+
+```
+health: bat0_up=True originators=3
+```
+
+The latest value is exposed via `meshctl status` (the `health` field) and the
+dashboard `/api/health` endpoint.
+
+## Systemd Service Status
 
 ```bash
-journalctl -u mesh-dashboard -f
+sudo systemctl status meshd
+sudo systemctl restart meshd
+sudo systemctl stop meshd
 ```
-
-### Mesh Log File
-
-```bash
-cat /var/log/mesh.log
-tail -f /var/log/mesh.log    # Follow
-grep ERROR /var/log/mesh.log # Filter errors
-```
-
-## Dashboard Monitoring
-
-The web dashboard at `http://localhost:8080` provides real-time visual monitoring.
-
-See [Ground Station](Ground-Station.md) for dashboard details.
 
 ## Script Output Example
 
 ```
-============================================
- Batman-Adv Mesh Network Status
-============================================
-
-[Module]
-  batman_adv: Loaded
-
-[Interfaces]
-  wlp0s20f3: up (MAC: aa:bb:cc:dd:ee:03)
-  bat0: up (IP: 10.0.0.3)
-
-[Mesh Neighbors]
-  aa:bb:cc:dd:ee:01   255   wlp0s20f3
-  aa:bb:cc:dd:ee:02   243   wlp0s20f3
-
-[Routing Table]
-  aa:bb:cc:dd:ee:01   255   aa:bb:cc:dd:ee:01   (wlp0s20f3)
-  aa:bb:cc:dd:ee:02   243   aa:bb:cc:dd:ee:01   (wlp0s20f3)
-
-[Gateway Status]
-  No gateways available
-
-[Statistics]
-  RX: 12.45 MB
-  TX: 8.32 MB
-
-============================================
-  Last updated: Wed Aug 12 10:30:00 UTC 2026
-============================================
+Node            : drone-01 (drone)
+IP (bat0)       : 10.0.0.3
+State           : up
+Radios          :
+  - radioA: wlan0 [mesh] joined
+Health          : bat0_up=True originators=3
 ```
+
+**See also:** [Ground Station](Ground-Station.md) · [Troubleshooting](Troubleshooting.md) · [Configuration](Configuration.md)

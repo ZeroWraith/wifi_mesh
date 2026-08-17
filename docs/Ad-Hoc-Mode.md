@@ -31,16 +31,34 @@ If you see `mesh point` in the output, use standard 802.11s setup. If you only s
 
 ## Quick Setup
 
-```bash
-sudo ./setup_adhoc.sh
+`meshd` handles IBSS automatically per-radio with `radios[].mode: ibss`
+(and `mode: auto` prefers mesh point, falling back to IBSS).
+
+```yaml
+# mesh.yaml
+node:
+  id: drone-01
+  ip: 10.0.0.3
+mesh:
+  essid: drone-mesh
+  ibss_bssid: "02:12:34:56:78:9a"
+radios:
+  - name: radioA
+    iface: auto
+    mode: ibss          # force IBSS (or leave auto)
+    band: 2.4g
+    channel: 6
 ```
 
-The script:
-1. Auto-detects your WiFi interface
-2. Checks for mesh point support
-3. Configures ad-hoc mode with fixed BSSID
-4. Creates bat0 and assigns IP
-5. Verifies the setup
+Then:
+
+```bash
+sudo systemctl start meshd
+meshctl status
+```
+
+`meshd` will: auto-detect the interface, configure ad-hoc mode with the fixed
+BSSID, create `bat0`, assign the IP, and verify the setup.
 
 ## Manual Setup
 
@@ -90,13 +108,13 @@ In ad-hoc mode, both nodes must join with the **same BSSID** to be in the same n
 02:12:34:56:78:9a
 ```
 
-This is configured in `config.sh` as `MESH_BSSID`. Change it if you have multiple independent mesh networks in the same area.
+This is configured in `mesh.yaml` as `mesh.ibss_bssid`. Change it if you have multiple independent mesh networks in the same area.
 
 **Why is this needed?** Without a fixed BSSID, each node might create its own IBSS network with a random BSSID, preventing them from communicating.
 
 ## Adapter Health Check
 
-The `setup_adhoc.sh` script checks adapter txpower:
+`meshd` checks the adapter txpower when probing interfaces:
 
 ```bash
 iw dev wlp0s20f3 info | grep txpower
@@ -108,7 +126,7 @@ If `tx_dropped` increases rapidly after joining IBSS, the adapter may need a phy
 
 ## Restoring Managed Mode
 
-After stopping the mesh, WiFi is automatically restored to managed mode by `stop_adhoc.sh`. If you need to do this manually:
+After stopping the mesh, WiFi is automatically restored to managed mode by `meshd`. If you need to do this manually:
 
 ```bash
 sudo ip link set wlp0s20f3 down
@@ -128,4 +146,4 @@ sudo rfkill unblock wifi
 | `batman_adv: Unknown symbol` | Module not built for your kernel, rebuild from source |
 | ESSID mismatch | All nodes must use the EXACT same ESSID |
 | Channel mismatch | All nodes must be on the SAME channel |
-| BSSID mismatch | All nodes must use the same `MESH_BSSID` |
+| BSSID mismatch | All nodes must use the same `mesh.ibss_bssid` |

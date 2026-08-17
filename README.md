@@ -1,20 +1,32 @@
 # Batman-Adv Drone Mesh Network
 
 ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)
-![Shell](https://img.shields.io/badge/language-Bash-green)
+![Python](https://img.shields.io/badge/language-Python-blue)
 ![Batman-Adv](https://img.shields.io/badge/batman--adv-Layer%202%20mesh-blue)
 
-True peer-to-peer WiFi mesh networking for drone swarms using batman-adv. Every drone is an identical peer — no hierarchy, no central controller, automatic self-healing.
+True peer-to-peer WiFi mesh networking for drone swarms using batman-adv, controlled by a single `meshd` daemon on every node. Every drone is an identical peer — no hierarchy, no central controller, automatic self-healing.
+
+## What is this?
+
+A complete drone-mesh software stack. Each node runs one daemon (`meshd`) that owns the whole data plane and control plane:
+
+- **Data plane** — radios, bat0 interface, routing settings, QoS
+- **Control plane** — lifecycle, local operator socket, and a JSON-RPC management plane over the mesh
+- **Services** — alfred, GPS distribution, MAVLink forwarding, video pipeline, web dashboard
 
 ## Features
 
 - **Self-healing mesh** — automatic reroute within 3-5 seconds when nodes fail
-- **True peer-to-peer** — every drone runs identical configuration
+- **True peer-to-peer** — every node runs identical configuration
 - **Multi-hop routing** — traffic routes through intermediate drones transparently
-- **Video streaming** — GStreamer H.264 over UDP via mesh
-- **MAVLink integration** — forward flight controller telemetry to ground station
+- **Declarative config** — a single `mesh.yaml` per node, validated at startup
+- **Lifecycle management** — every bring-up step is retried, supervised, and rolled back if the mesh fails
+- **Video streaming** — supervised GStreamer H.264 pipeline (sender or receiver)
+- **MAVLink integration** — forward flight-controller telemetry to the ground station
 - **GPS distribution** — share GPS positions across the mesh via alfred
-- **Web dashboard** — real-time D3.js visualization of mesh topology
+- **QoS** — strict-priority classes for command & control + video
+- **Web dashboard** — Flask dashboard served by meshd, backed by live mesh data
+- **Remote management** — `meshctl -d <ip>` JSON-RPC to any node over the mesh
 - **Ad-hoc fallback** — works with adapters that don't support 802.11s
 
 ## Architecture
@@ -22,24 +34,26 @@ True peer-to-peer WiFi mesh networking for drone swarms using batman-adv. Every 
 ```
 TRUE PEER MESH (No Hierarchy):
 
-    +-----------+         +-----------+
-    |  Drone 1  |<------->|  Drone 2  |
-    | 10.0.0.1  |         | 10.0.0.2  |
-    +-----+-----+         +-----+-----+
-          |                     |
-          |    +-----------+    |
-          +--->|  Drone 3  |<---+
-               | 10.0.0.3  |
-               +-----+-----+
-                     |
-                +----+----+
-                | Ground  |
-                | Station |
-                |10.0.0.100|
-                +---------+
+    +-----------+         +-----------+        +-----------+
+    |  Drone 1  |<------->|  Drone 2  |<------>|  Drone 3  |
+    | 10.0.0.1  |         | 10.0.0.2  |        | 10.0.0.3  |
+    +-----+-----+         +-----+-----+        +-----+-----+
+          |                     ^                    |
+          +---------------------+--------------------+
+                                |
+                           +----+----+
+                           |  Ground  |
+                           | Station  |
+                           |10.0.0.100|
+                           +----+-----+
+                                |
+                          +-----+------+
+                          |  Dashboard  |
+                          |  (meshd:8080)|
+                          +-------------+
 
-Every node can reach every other node via multi-hop.
-Batman-adv handles all routing automatically.
+Every node runs `meshd` and is reachable via multi-hop.
+batman-adv handles routing; meshd handles everything else.
 ```
 
 ## Supported Hardware
@@ -53,94 +67,90 @@ Batman-adv handles all routing automatically.
 ## Quick Start
 
 ```bash
-# 1. Install dependencies (run once per drone)
+# 1. Install dependencies (run once per node)
 sudo ./install_packages.sh
 
-# 2. Edit configuration
-nano config.sh    # Set DRONE_IP, MESH_IFACE, MESH_ID
+# 2. Install meshd + systemd unit (creates /opt/mesh, venv, config)
+sudo ./install.sh --with-all
 
-# 3. Start mesh (Ad-hoc mode — works on most adapters)
-sudo ./setup_adhoc.sh
+# 3. Edit per-node configuration
+sudo nano /opt/mesh/config/mesh.yaml    # set node.id, node.ip, management.token
+
+# 4. Validate and start
+sudo meshctl -c /opt/mesh/config/mesh.yaml validate
+sudo systemctl start meshd
+
+# 5. Inspect
+meshctl status
 ```
 
-For ground station:
+The ground station additionally enables `dashboard: enabled: true` (default in
+the shipped `config/mesh.yaml`) and opens **http://localhost:8080**.
 
-```bash
-sudo ./setup_ground_station.sh
-```
+## Repo layout
 
-Access the dashboard at **http://localhost:8080**
+| Path | Purpose |
+|------|---------|
+| `src/meshd/` | The `meshd` daemon package |
+| `tests/` | pytest suite (46 tests) |
+| `config/mesh.yaml` | Example node configuration |
+| `deploy/units/meshd.service` | systemd unit |
+| `install.sh` | Install to `/opt/mesh` + enable systemd |
+| `install_packages.sh` | OS packages (batctl, alfred, gpsd, GStreamer…) |
+| `uninstall.sh` | Remove all mesh configuration |
+| `docs/` | Wiki-style documentation |
+| `BATMAN_ADV_DRONE_MESH_COMPLETE_GUIDE.md` | The fully-built reference guide |
 
-## Script Reference
+## CLI
 
-| Script | Purpose |
-|--------|---------|
-| `config.sh` | Configuration — IP, mesh ID, channel, batman settings |
-| `install_packages.sh` | Install required packages (batctl, alfred, GStreamer, etc.) |
-| `install.sh` | Install scripts to `/opt/mesh` and set up systemd service |
-| `setup_mesh.sh` | Configure batman-adv mesh (802.11s mesh point mode) |
-| `setup_adhoc.sh` | Configure batman-adv mesh (Ad-hoc/IBSS mode, auto-detects) |
-| `setup_ground_station.sh` | Full ground station setup with web dashboard |
-| `start_mesh.sh` | Start the mesh network (loads modules, runs setup) |
-| `stop_mesh.sh` | Stop the mesh network (802.11s mode) |
-| `stop_adhoc.sh` | Stop the mesh network (Ad-hoc mode, restores managed WiFi) |
-| `stop_gcs_mesh.sh` | Stop ground station mesh |
-| `mesh_status.sh` | Display mesh status — neighbors, routes, gateways, stats |
-| `mesh_video_sender.sh` | Stream video file over UDP via mesh (GStreamer) |
-| `mesh_video_receiver.sh` | Receive and display H.264 video stream (GStreamer) |
-| `build_batman_adv.sh` | Build batman-adv kernel module from source (Jetson Tegra) |
-| `uninstall.sh` | Remove all mesh configuration and restore system defaults |
+| Command | Purpose |
+|---------|---------|
+| `meshd` | Run the daemon (`-c` config, `--init`, `--dry-run`) |
+| `meshctl status` | Local node status (radios, lifecycle, health) |
+| `meshctl ping / stop / restart` | Local control |
+| `meshctl nodes` | List fleet nodes from the alfred registry |
+| `meshctl -d <ip> status` | Remote node status over mesh JSON-RPC |
+| `meshctl token` | Generate a management token |
 
 ## Dashboard
 
-The web dashboard provides real-time mesh topology visualization:
+Served by `meshd` when `dashboard.enabled` is true (Flask):
 
-- **Force-directed graph** — interactive D3.js network visualization
+- **Force-directed graph** — interactive D3.js topology visualization
 - **Link quality indicators** — strong/medium/weak with color coding
-- **Node list** — all discovered mesh nodes with TQ metrics
+- **Node list** — discovered nodes with TQ metrics
 - **Neighbor list** — direct neighbors and connection quality
+- **GPS panel** — positions published through alfred
 - **Auto-refresh** — updates every 3 seconds
 
-Start the dashboard manually:
-
-```bash
-cd mesh_dashboard && python3 app.py
-# Access at http://localhost:8080
-```
-
-## Key Configuration
-
-Edit `config.sh` on each drone:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `DRONE_IP` | `10.0.0.3` | Unique IP for this drone (10.0.0.X) |
-| `PHYS_IFACE` | `wlp0s20f3` | WiFi interface (auto-detected if empty) |
-| `MESH_ID` | `drone-mesh` | Must be same on all drones |
-| `MESH_CHANNEL` | `6` | Must be same on all drones |
-| `BATMAN_ROUTING` | `BATMAN_IV` | `BATMAN_V` recommended for drones |
-| `GATEWAY_MODE` | `off` | Set `server` to share internet |
+Access at **http://<node-ip>:8080**.
 
 ## Documentation
 
-- **[Full Implementation Guide](BATMAN_ADV_DRONE_MESH_COMPLETE_GUIDE.md)** — comprehensive 1900-line reference covering protocol details, hardware setup, and advanced configuration
 - **[docs/](docs/)** — wiki-style documentation organized by topic
+  - [Getting Started](docs/Getting-Started.md)
+  - [Configuration](docs/Configuration.md) (`mesh.yaml` reference)
+  - [Monitoring](docs/Monitoring.md)
+  - [Video Streaming](docs/Video-Streaming.md)
+  - [Ground Station](docs/Ground-Station.md)
+  - [Architecture](docs/Architecture.md)
+  - [Troubleshooting](docs/Troubleshooting.md)
+- **[Full Implementation Guide](BATMAN_ADV_DRONE_MESH_COMPLETE_GUIDE.md)** — comprehensive reference covering protocol details, hardware setup, and advanced configuration
 
-## Video Streaming
+## Development
 
 ```bash
-# Sender (on drone)
-./mesh_video_sender.sh 10.0.0.100 5000 /path/to/video.mp4
-
-# Receiver (on ground station)
-./mesh_video_receiver.sh 5000
+python3 -m venv .venv
+.venv/bin/pip install -e ".[test,dashboard,telemetry]"
+.venv/bin/pytest          # run the test suite
+.venv/bin/ruff check src  # lint
 ```
 
 ## Troubleshooting
 
 ```bash
-# Check mesh status
-sudo ./mesh_status.sh
+# Check the daemon
+meshctl status
 
 # Check batman-adv neighbors
 sudo batctl o    # originators
@@ -150,7 +160,7 @@ sudo batctl n    # neighbors
 lsmod | grep batman
 
 # View logs
-cat /var/log/mesh.log
+sudo journalctl -u meshd -f
 ```
 
 See [docs/Troubleshooting.md](docs/Troubleshooting.md) for detailed debugging.
@@ -161,4 +171,6 @@ See [docs/Troubleshooting.md](docs/Troubleshooting.md) for detailed debugging.
 sudo ./uninstall.sh
 ```
 
-Removes systemd services, scripts, kernel config, firewall rules, and IP forwarding settings. Does not remove installed packages.
+Removes `meshd.service`, the legacy `batman-mesh.service`, `/opt/mesh`, kernel
+config, firewall rules, and IP forwarding settings. Does not remove installed
+packages.
