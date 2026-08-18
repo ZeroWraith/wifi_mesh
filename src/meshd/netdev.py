@@ -327,10 +327,13 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
          "fixed-freq", fixed_bssid],
         timeout=20,
     )
-    joined = await ibss_joined_bssid(exec, iface)
     target = fixed_bssid.lower()
 
-    if joined is not None and joined.lower() == target:
+    # Some drivers (notably brcmfmac on Raspberry Pi) report the joined BSSID
+    # asynchronously, seconds after the join command returns. Poll briefly
+    # before deciding the join failed.
+    joined = await _poll_ibss_bssid(exec, iface, fixed_bssid)
+    if joined is not None:
         return True, joined
 
     log.warning("iw fixed-freq ignored by driver (got %s, expected %s); "
@@ -341,13 +344,14 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
     await exec.run(["iwconfig", iface, "mode", "ad-hoc"])
     await link_up(exec, iface)
     await exec.run(
-        ["iwconfig", iface, "essid", essid, "channel", "", "ap", fixed_bssid]
+        ["iwconfig", iface, "essid", essid, "ap", fixed_bssid]
     )
     # iwconfig has no freeride channel knob that guarantees the right freq;
     # set frequency explicitly where supported.
     await exec.run(["iwconfig", iface, "freq", str(frequency_mhz) + "M"])
-    joined2 = await ibss_joined_bssid(exec, iface)
-    if joined2 is not None and joined2.lower() == target:
+
+    joined2 = await _poll_ibss_bssid(exec, iface, fixed_bssid)
+    if joined2 is not None:
         return True, joined2
 
     log.warning("BSSID still mismatched (%s vs %s); continuing...", joined2, target)
@@ -355,16 +359,38 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
 
 
 async def ibss_joined_bssid(exec: Executor, iface: str) -> str | None:
-    """Report the BSSID the interface is currently joined to (if any)."""
+    """Report the BSSID the interface is currently joined to (if any).
+
+    Parses both common ``iw dev <iface> link`` outputs:
+    ``Connected to 02:12:34:56:78:9a (on wlan0)`` (brcmfmac/most drivers) and
+    ``IBSS: joined 02:12:34:56:78:9a ...`` / ``Joined ...`` variants.
+    """
     out = await exec.output(["iw", "dev", iface, "link"])
     for line in out.splitlines():
-        stripped = line.strip()
-        low = stripped.lower()
-        if low.startswith("ibss") or low.startswith("joined"):
-            parts = stripped.split()
-            for p in parts:
+        low = line.strip().lower()
+        if low.startswith("connected to") or low.startswith("ibss") \
+                or low.startswith("joined"):
+            for p in line.split():
                 if re.match(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", p.lower()):
                     return p
+    return None
+
+
+async def _poll_ibss_bssid(exec: Executor, iface: str,
+                           expected_bssid: str,
+                           attempts: int = 5, delay: float = 1.0) -> str | None:
+    """Poll ``iw dev <iface> link`` until the IBSS BSSID appears.
+
+    Some drivers (brcmfmac on Raspberry Pi) report the joined BSSID only
+    seconds after the join command returns, so a single read is not enough.
+    Returns the matching BSSID on success, else None.
+    """
+    target = expected_bssid.lower()
+    for _ in range(attempts):
+        joined = await ibss_joined_bssid(exec, iface)
+        if joined is not None and joined.lower() == target:
+            return joined
+        await asyncio.sleep(delay)
     return None
 
 
