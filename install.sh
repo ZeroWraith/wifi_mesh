@@ -19,7 +19,7 @@ VENV="$INSTALL_DIR/.venv"
 UNIT_SRC="$SCRIPT_DIR/deploy/units/meshd.service"
 UNIT_DST="/etc/systemd/system/meshd.service"
 
-EXTRA_FLAGS=""
+EXTRAS=""
 
 log()  { echo -e "${GREEN}[INSTALL]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -32,9 +32,9 @@ fi
 # --- CLI ---------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --with-telemetry) EXTRA_FLAGS="$EXTRA_FLAGS telemetry"; shift ;;
-        --with-dashboard) EXTRA_FLAGS="$EXTRA_FLAGS dashboard"; shift ;;
-        --with-all)       EXTRA_FLAGS="telemetry dashboard"; shift ;;
+        --with-telemetry) EXTRAS="${EXTRAS:+$EXTRAS,}telemetry"; shift ;;
+        --with-dashboard) EXTRAS="${EXTRAS:+$EXTRAS,}dashboard"; shift ;;
+        --with-all)       EXTRAS="telemetry,dashboard"; shift ;;
         -h|--help)
             echo "Usage: $0 [--with-telemetry] [--with-dashboard] [--with-all]"
             exit 0 ;;
@@ -58,8 +58,8 @@ fi
 
 log "Installing meshd + dependencies into $VENV..."
 "$VENV/bin/pip" install --upgrade pip -q
-if [[ -n "$EXTRA_FLAGS" ]]; then
-    "$VENV/bin/pip" install -q "$SCRIPT_DIR[$EXTRA_FLAGS]"
+if [[ -n "$EXTRAS" ]]; then
+    "$VENV/bin/pip" install -q "${SCRIPT_DIR}[${EXTRAS}]"
 else
     "$VENV/bin/pip" install -q "$SCRIPT_DIR"
 fi

@@ -77,7 +77,6 @@ install_packages() {
             apt-get install -y \
                 batctl \
                 alfred \
-                batadv-vis \
                 iw \
                 wpasupplicant \
                 hostapd \
@@ -96,13 +95,12 @@ install_packages() {
                 v4l-utils \
                 gpsd \
                 gpsd-clients \
-                python3-gps || true
+                python3-gps
             ;;
         fedora|rhel|centos)
             dnf install -y \
                 batctl \
                 alfred \
-                batadv-vis \
                 iw \
                 wpa_supplicant \
                 hostapd \
@@ -278,8 +276,9 @@ main() {
     log "Installation complete!"
     echo ""
     echo "Next steps:"
-    echo "  1. Edit config.sh with your settings"
-    echo "  2. Run: sudo ./setup_mesh.sh"
+    echo "  1. Run: sudo ./install.sh   (installs meshd into /opt/mesh/.venv)"
+    echo "  2. Edit /opt/mesh/config/mesh.yaml (node.id, node.ip, management.token)"
+    echo "  3. Start: sudo systemctl start meshd"
     echo "=========================================="
 }
 
