@@ -87,7 +87,7 @@ class SupervisedProc:
                 break
             self.restarts += 1
             self.last_error = f"exited rc={self.proc.returncode}"
-            if self.restarts > MAX_RESTARTS:
+            if self.restarts >= MAX_RESTARTS:
                 log.error("service '%s' gave up after %s restarts",
                           self.name, MAX_RESTARTS)
                 break

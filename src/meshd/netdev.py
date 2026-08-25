@@ -116,7 +116,6 @@ class Executor:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError:
             proc.kill()
-            await proc.wait()
             stdout_b, stderr_b = await proc.communicate()
             res = CmdResult(cmd, -9, stdout_b.decode(errors="replace"),
                             stderr_b.decode(errors="replace") + "\n[timed out]")
@@ -160,7 +159,6 @@ class Executor:
             )
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.wait()
             stdout_b, stderr_b = await proc.communicate()
             return CmdResult(cmd, -9, stdout_b.decode(errors="replace"),
                              stderr_b.decode(errors="replace") + "\n[timed out]")
@@ -186,7 +184,12 @@ async def interfaces(exec: Executor) -> list[str]:
 async def wireless_interfaces(exec: Executor) -> list[str]:
     """Wireless interfaces reported by ``iw dev``."""
     out = await exec.output(["iw", "dev"])
-    names = [line.split()[1] for line in out.splitlines() if line.strip().startswith("Interface")]
+    names = []
+    for line in out.splitlines():
+        if line.strip().startswith("Interface"):
+            parts = line.split()
+            if len(parts) >= 2:
+                names.append(parts[1])
     return names
 
 
@@ -444,8 +447,16 @@ async def apply_driver_options(exec: Executor, options: str) -> None:
     line = f"options {options}"
     path = "/etc/modprobe.d/mesh-radio.conf"
     try:
-        with open(path, "a") as fh:
-            fh.write(line + "\n")
-        log.info("wrote modprobe options to %s: %s", path, line)
+        try:
+            with open(path, "r") as fh:
+                existing = fh.read()
+        except FileNotFoundError:
+            existing = ""
+        if line not in existing:
+            with open(path, "a") as fh:
+                fh.write(line + "\n")
+            log.info("wrote modprobe options to %s: %s", path, line)
+        else:
+            log.debug("modprobe options already present in %s: %s", path, line)
     except PermissionError:
         log.warning("cannot write %s (not root?)", path)

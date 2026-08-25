@@ -157,7 +157,12 @@ class RadioConfig:
             raise ConfigError(
                 f"radios[].band must be one of {BANDS}, got '{self.band}'"
             )
-        lo, hi = (1, 14) if self.band == "2.4g" else (34, 177)
+        if self.band == "2.4g":
+            lo, hi = 1, 14
+        elif self.band == "6g":
+            lo, hi = 1, 233
+        else:
+            lo, hi = 34, 177
         self.channel = _as_int(self.channel, "radios[].channel", lo, hi, 6)
         if self.txpower_dbm is not None:
             self.txpower_dbm = _as_int(
@@ -172,11 +177,9 @@ class RadioConfig:
         if self.band == "2.4g":
             return 2412 + (self.channel - 1) * 5
         if self.band == "5g":
-            if self.channel <= 30:
-                return 5000 + self.channel * 5
             return 5000 + self.channel * 5
         if self.band == "6g":
-            return BAND_BASE_FREQ["6g"] + self.channel * 5
+            return BAND_BASE_FREQ["6g"] + (self.channel - 1) * 5
         raise ConfigError(f"unsupported band {self.band}")
 
 

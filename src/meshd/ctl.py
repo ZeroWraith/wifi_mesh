@@ -60,6 +60,12 @@ async def _rpc_or_exit(sock: str, req: dict) -> dict:
     except FileNotFoundError:
         print(f"error: daemon not running (no socket at {sock})", file=sys.stderr)
         sys.exit(1)
+    except PermissionError:
+        print(f"error: permission denied connecting to {sock} (run as root or fix socket permissions)", file=sys.stderr)
+        sys.exit(1)
+    except ConnectionRefusedError:
+        print(f"error: connection refused to {sock} (is meshd running?)", file=sys.stderr)
+        sys.exit(1)
 
 
 def _print_status(data: dict) -> None:

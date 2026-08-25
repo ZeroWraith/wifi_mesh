@@ -71,6 +71,7 @@ class Lifecycle:
         self.state: LifecycleState = LifecycleState.DOWN
         self.results: list[StepResult] = []
         self._degraded: bool = False
+        self._start_order: list[LifecycleState] = list(START_ORDER)
 
     # -- registration ---------------------------------------------------------
 
@@ -79,12 +80,12 @@ class Lifecycle:
 
     def register_after(self, after: LifecycleState, state: LifecycleState,
                        step: Step) -> None:
-        """Insert ``step`` at ``state`` which must come after ``after`` in START_ORDER."""
-        idx = START_ORDER.index(after)
+        """Insert ``step`` at ``state`` which must come after ``after`` in start order."""
+        idx = self._start_order.index(after)
         self.steps[state] = step
-        # Keep START_ORDER consistent: insert after the anchor.
-        if state not in START_ORDER:
-            START_ORDER.insert(idx + 1, state)
+        # Keep start order consistent: insert after the anchor.
+        if state not in self._start_order:
+            self._start_order.insert(idx + 1, state)
 
     # -- execution ------------------------------------------------------------
 
@@ -102,7 +103,7 @@ class Lifecycle:
     async def start(self) -> list[StepResult]:
         self.results = []
         self._degraded = False
-        for state in START_ORDER:
+        for state in self._start_order:
             step = self.steps.get(state)
             if step is None:
                 self._set_state(state)
@@ -136,7 +137,7 @@ class Lifecycle:
     async def stop(self) -> list[StepResult]:
         results = []
         self._set_state(LifecycleState.STOPPING)
-        for state in reversed(START_ORDER):
+        for state in reversed(self._start_order):
             step = self.steps.get(state)
             if step is None or step.stop is None:
                 continue

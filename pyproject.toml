@@ -16,7 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 telemetry = ["pymavlink>=2.4.37"]
 dashboard = ["flask>=2.3"]
-test = ["pytest>=7.0", "ruff>=0.4"]
+test = ["pytest>=7.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
 
 [project.scripts]
 meshd = "meshd.main:main"

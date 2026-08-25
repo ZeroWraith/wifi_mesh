@@ -34,7 +34,7 @@ async def module_available(exec: Executor) -> bool:
     return await exec.ok(["modinfo", MODULE])
 
 
-async def load_module(exec: Executor, routing_algo: str, use_sudo: bool = False) -> None:
+async def load_module(exec: Executor, routing_algo: str) -> None:
     """Load batman_adv with the requested routing algorithm.
 
     The routing algorithm is a module parameter and (on most kernels) only
@@ -126,15 +126,15 @@ async def set_ip_forwarding(exec: Executor, enabled: bool) -> None:
 async def configure_nat(exec: Executor, external_iface: str) -> bool:
     """MASQUERADE bat0 traffic out the external interface (gateway role)."""
     ok = True
-    for args in (
-        ["iptables", "-t", "nat", "-C", "POSTROUTING", "-o", external_iface,
-         "-j", "MASQUERADE"],
-        ["iptables", "-t", "nat", "-I", "POSTROUTING", "-o", external_iface,
-         "-j", "MASQUERADE"],
-    ):
-        res = await exec.run(args)
-        if not res.ok:
-            ok = res.returncode == 1 if args[2] == "-C" else False
+    # Check if MASQUERADE rule exists; only insert if it doesn't.
+    check_args = ["iptables", "-t", "nat", "-C", "POSTROUTING", "-o", external_iface,
+                  "-j", "MASQUERADE"]
+    res = await exec.run(check_args)
+    if not res.ok:
+        insert_args = ["iptables", "-t", "nat", "-I", "POSTROUTING", "-o", external_iface,
+                       "-j", "MASQUERADE"]
+        res = await exec.run(insert_args)
+        ok = res.ok
     await exec.run(["iptables", "-I", "FORWARD", "-i", BAT0, "-o", external_iface,
                     "-j", "ACCEPT"])
     await exec.run(["iptables", "-I", "FORWARD", "-i", external_iface, "-o", BAT0,
