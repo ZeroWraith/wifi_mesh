@@ -320,16 +320,25 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
     (joined_ok, joined_bssid_or_none). Does not raise on BSSID mismatch —
     the caller decides whether to continue, since some drivers only report
     the BSSID after a few seconds.
+
+    On some drivers (brcmfmac on Raspberry Pi), the BSSID is never reported
+    via ``iw dev <iface> link`` even when the IBSS is successfully joined.
+    We treat a successful join command (rc=0) as success even if BSSID
+    verification fails.
     """
     await link_down(exec, iface)
     await exec.run(["iw", "dev", iface, "set", "type", "ibss"])
     await link_up(exec, iface)
 
-    await exec.run(
+    res = await exec.run(
         ["iw", "dev", iface, "ibss", "join", essid, str(frequency_mhz),
          "fixed-freq", fixed_bssid],
         timeout=20,
     )
+    if res.ok:
+        log.info("iw ibss join succeeded (rc=0), treating as joined")
+        return True, fixed_bssid
+
     target = fixed_bssid.lower()
 
     # Some drivers (notably brcmfmac on Raspberry Pi) report the joined BSSID
@@ -346,12 +355,16 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
     await link_down(exec, iface)
     await exec.run(["iwconfig", iface, "mode", "ad-hoc"])
     await link_up(exec, iface)
-    await exec.run(
+    res2 = await exec.run(
         ["iwconfig", iface, "essid", essid, "ap", fixed_bssid]
     )
     # iwconfig has no freeride channel knob that guarantees the right freq;
     # set frequency explicitly where supported.
     await exec.run(["iwconfig", iface, "freq", str(frequency_mhz) + "M"])
+
+    if res2.ok:
+        log.info("iwconfig ibss join succeeded (rc=0), treating as joined")
+        return True, fixed_bssid
 
     joined2 = await _poll_ibss_bssid(exec, iface, fixed_bssid)
     if joined2 is not None:
