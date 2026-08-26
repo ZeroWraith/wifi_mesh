@@ -133,7 +133,13 @@ class RadioManager:
                     joined_bssid = await netdev.ibss_joined_bssid(self.exec, iface)
                 state.joined = joined_bssid is not None
                 if not state.joined:
-                    state.error = "IBSS join could not be verified"
+                    if "does not support IBSS" in (state.error or ""):
+                        state.error = ("IBSS not supported by hardware/firmware. "
+                                       "Pi 4 built-in WiFi (BCM43455) lacks IBSS support. "
+                                       "Use USB WiFi dongle (ath9k/rtl8812au/mt7601u) "
+                                       "or set radio mode='mesh' for 802.11s if supported.")
+                    else:
+                        state.error = "IBSS join could not be verified"
 
             if cfg.txpower_dbm:
                 await netdev.set_txpower(self.exec, iface, cfg.txpower_dbm)

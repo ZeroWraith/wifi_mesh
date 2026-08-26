@@ -311,6 +311,62 @@ async def leave_mesh(exec: Executor, iface: str) -> None:
     await exec.run(["iw", "dev", iface, "mesh", "leave"])
 
 
+async def _detect_brcmfmac(exec: Executor, iface: str) -> bool:
+    """Check if interface uses brcmfmac driver."""
+    try:
+        out = await exec.output(["readlink", "-f", f"/sys/class/net/{iface}/device/driver"])
+        return "brcmfmac" in out
+    except Exception:
+        return False
+
+
+async def _check_ibss_supported(exec: Executor, iface: str) -> bool:
+    """Check if the phy for this interface actually supports IBSS mode.
+
+    Some firmware (e.g., brcmfmac on Pi 4 BCM43455) advertises IBSS in nl80211
+    but fails validation when actually trying to use it. We check the phy's
+    valid interface combinations to confirm real support.
+    """
+    try:
+        # Get phy name for this interface
+        phy_out = await exec.output(["iw", "dev", iface, "info"])
+        phy_name = None
+        for line in phy_out.splitlines():
+            if "wiphy" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    phy_name = f"phy{parts[-1]}"
+                    break
+
+        if not phy_name:
+            log.warning("Could not determine phy for %s, assuming IBSS not supported", iface)
+            return False
+
+        # Check valid interface combinations
+        phy_info = await exec.output(["iw", "phy", phy_name, "info"])
+        log.debug("Checking IBSS support for %s (phy %s)", iface, phy_name)
+        in_combinations = False
+        for line in phy_info.splitlines():
+            stripped = line.strip()
+            if "valid interface combinations" in line.lower():
+                in_combinations = True
+                continue
+            if in_combinations:
+                if stripped.startswith("*") or stripped.startswith("#{"):
+                    if "ibss" in stripped.lower() or "mesh" in stripped.lower():
+                        log.info("IBSS/mesh supported for %s (phy %s)", iface, phy_name)
+                        return True
+                    continue
+                if not stripped:
+                    continue
+                break
+        log.warning("IBSS/mesh NOT supported for %s (phy %s) - valid combinations lack IBSS/mesh", iface, phy_name)
+        return False
+    except Exception as e:
+        log.warning("Error checking IBSS support for %s: %s", iface, e)
+        return False
+
+
 async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
                     fixed_bssid: str) -> tuple[bool, str | None]:
     """Join an IBSS with a FIXED BSSID so all nodes share the same cell.
@@ -325,9 +381,35 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
     via ``iw dev <iface> link`` even when the IBSS is successfully joined.
     We treat a successful join command (rc=0) as success even if BSSID
     verification fails.
+
+    On brcmfmac (Raspberry Pi 3/4/5 built-in WiFi), IBSS join often fails
+    with "Operation not supported" despite nl80211 advertising IBSS support.
+    We detect this and attempt iwconfig fallback more aggressively.
     """
+    # Check if hardware/firmware actually supports IBSS
+    ibss_supported = await _check_ibss_supported(exec, iface)
+    if not ibss_supported:
+        log.error("Interface %s hardware/firmware does not support IBSS mode (phy valid interface combinations lack IBSS). "
+                  "Pi 4 built-in WiFi (BCM43455) firmware lacks IBSS support. "
+                  "Use a USB WiFi dongle with ath9k/rtl8812au/mt7601u driver, "
+                  "or set radio mode to 'mesh' for 802.11s if supported.", iface)
+        return False, None
+
+    is_brcmfmac = await _detect_brcmfmac(exec, iface)
+    if is_brcmfmac:
+        log.info("Detected brcmfmac driver on %s, enabling aggressive IBSS fallback", iface)
+
+    # First attempt: try standard iw ibss join
     await link_down(exec, iface)
-    await exec.run(["iw", "dev", iface, "set", "type", "ibss"])
+    try:
+        await exec.run(["iw", "dev", iface, "set", "type", "ibss"])
+    except Exception as e:
+        if "Device or resource busy" in str(e) or "-16" in str(e):
+            log.warning("Interface busy when setting IBSS type, waiting and retrying...")
+            await asyncio.sleep(3)
+            await exec.run(["iw", "dev", iface, "set", "type", "ibss"])
+        else:
+            raise
     await link_up(exec, iface)
 
     res = await exec.run(
@@ -339,34 +421,69 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
         log.info("iw ibss join succeeded (rc=0), treating as joined")
         return True, fixed_bssid
 
+    # Check for specific "Operation not supported" error (brcmfmac IBSS bug)
+    stderr_lower = res.stderr.lower() if res.stderr else ""
+    is_brcmfmac_ibss_bug = (
+        "operation not supported" in stderr_lower or 
+        "-95" in stderr_lower or
+        (is_brcmfmac and "not supported" in stderr_lower)
+    )
+
+    if is_brcmfmac_ibss_bug:
+        log.warning("brcmfmac IBSS join not supported (kernel bug), skipping to iwconfig fallback")
+
     target = fixed_bssid.lower()
 
     # Some drivers (notably brcmfmac on Raspberry Pi) report the joined BSSID
     # asynchronously, seconds after the join command returns. Poll briefly
     # before deciding the join failed.
-    joined = await _poll_ibss_bssid(exec, iface, fixed_bssid)
-    if joined is not None:
-        return True, joined
+    if not is_brcmfmac_ibss_bug:
+        joined = await _poll_ibss_bssid(exec, iface, fixed_bssid, attempts=10, delay=1.0)
+        if joined is not None:
+            return True, joined
 
-    log.warning("iw fixed-freq ignored by driver (got %s, expected %s); "
-                "falling back to iwconfig", joined, target)
+        log.warning("iw fixed-freq ignored by driver (got %s, expected %s); "
+                    "falling back to iwconfig", joined, target)
 
     # Fallback path via iwconfig (wireless-tools).
+    # For brcmfmac, try this more aggressively.
+    log.info("Attempting iwconfig fallback for IBSS join...")
     await link_down(exec, iface)
-    await exec.run(["iwconfig", iface, "mode", "ad-hoc"])
+    
+    # Try to force mode with iwconfig
+    for attempt in range(3):
+        try:
+            await exec.run(["iwconfig", iface, "mode", "ad-hoc"])
+            break
+        except Exception as e:
+            if "Device or resource busy" in str(e) and attempt < 2:
+                log.warning("iwconfig mode ad-hoc busy, retrying...")
+                await asyncio.sleep(2)
+            else:
+                raise
+
     await link_up(exec, iface)
+    await asyncio.sleep(1)
+
     res2 = await exec.run(
         ["iwconfig", iface, "essid", essid, "ap", fixed_bssid]
     )
-    # iwconfig has no freeride channel knob that guarantees the right freq;
-    # set frequency explicitly where supported.
     await exec.run(["iwconfig", iface, "freq", str(frequency_mhz) + "M"])
 
     if res2.ok:
-        log.info("iwconfig ibss join succeeded (rc=0), treating as joined")
-        return True, fixed_bssid
+        # Verify the interface actually changed to IBSS and joined
+        await asyncio.sleep(2)
+        link_info = await exec.output(["iw", "dev", iface, "link"])
+        if "Not connected" not in link_info and ("IBSS" in link_info or "Connected" in link_info):
+            log.info("iwconfig ibss join verified: interface joined")
+            if is_brcmfmac:
+                await asyncio.sleep(3)
+            return True, fixed_bssid
+        else:
+            log.warning("iwconfig reported success but interface not joined: %s", link_info.strip())
 
-    joined2 = await _poll_ibss_bssid(exec, iface, fixed_bssid)
+    # Final poll for BSSID
+    joined2 = await _poll_ibss_bssid(exec, iface, fixed_bssid, attempts=10, delay=1.0)
     if joined2 is not None:
         return True, joined2
 
