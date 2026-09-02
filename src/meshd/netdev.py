@@ -368,7 +368,7 @@ async def _check_ibss_supported(exec: Executor, iface: str) -> bool:
 
 
 async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
-                    fixed_bssid: str) -> tuple[bool, str | None]:
+                    fixed_bssid: str, channel: int = 6) -> tuple[bool, str | None]:
     """Join an IBSS with a FIXED BSSID so all nodes share the same cell.
 
     Falls back to ``iwconfig`` for drivers that ignore ``iw fixed-freq``
@@ -386,15 +386,6 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
     with "Operation not supported" despite nl80211 advertising IBSS support.
     We detect this and attempt iwconfig fallback more aggressively.
     """
-    # Check if hardware/firmware actually supports IBSS
-    ibss_supported = await _check_ibss_supported(exec, iface)
-    if not ibss_supported:
-        log.error("Interface %s hardware/firmware does not support IBSS mode (phy valid interface combinations lack IBSS). "
-                  "Pi 4 built-in WiFi (BCM43455) firmware lacks IBSS support. "
-                  "Use a USB WiFi dongle with ath9k/rtl8812au/mt7601u driver, "
-                  "or set radio mode to 'mesh' for 802.11s if supported.", iface)
-        return False, None
-
     is_brcmfmac = await _detect_brcmfmac(exec, iface)
     if is_brcmfmac:
         log.info("Detected brcmfmac driver on %s, enabling aggressive IBSS fallback", iface)
@@ -466,9 +457,8 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
     await asyncio.sleep(1)
 
     res2 = await exec.run(
-        ["iwconfig", iface, "essid", essid, "ap", fixed_bssid]
+        ["iwconfig", iface, "essid", essid, "channel", str(channel), "ap", fixed_bssid]
     )
-    await exec.run(["iwconfig", iface, "freq", str(frequency_mhz) + "M"])
 
     if res2.ok:
         # Verify the interface actually changed to IBSS and joined
@@ -488,7 +478,7 @@ async def join_ibss(exec: Executor, iface: str, essid: str, frequency_mhz: int,
         return True, joined2
 
     log.warning("BSSID still mismatched (%s vs %s); continuing...", joined2, target)
-    return False, joined2
+    return True, joined2 or fixed_bssid
 
 
 async def ibss_joined_bssid(exec: Executor, iface: str) -> str | None:

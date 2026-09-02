@@ -127,19 +127,13 @@ class RadioManager:
                     state.error = "mesh join failed"
             else:
                 _, joined_bssid = await netdev.join_ibss(
-                    self.exec, iface, self.essid, cfg.frequency_mhz, self.ibss_bssid
+                    self.exec, iface, self.essid, cfg.frequency_mhz, self.ibss_bssid, cfg.channel
                 )
                 if joined_bssid is None:
                     joined_bssid = await netdev.ibss_joined_bssid(self.exec, iface)
                 state.joined = joined_bssid is not None
                 if not state.joined:
-                    if "does not support IBSS" in (state.error or ""):
-                        state.error = ("IBSS not supported by hardware/firmware. "
-                                       "Pi 4 built-in WiFi (BCM43455) lacks IBSS support. "
-                                       "Use USB WiFi dongle (ath9k/rtl8812au/mt7601u) "
-                                       "or set radio mode='mesh' for 802.11s if supported.")
-                    else:
-                        state.error = "IBSS join could not be verified"
+                    state.error = "IBSS join could not be verified"
 
             if cfg.txpower_dbm:
                 await netdev.set_txpower(self.exec, iface, cfg.txpower_dbm)
